@@ -5,9 +5,12 @@ go 1.20
 require (
 	github.com/breez/breez v0.0.0-20220717152659-09eb13fe2706
 	github.com/btcsuite/btcwallet/walletdb v1.4.0
-	github.com/lightningnetwork/lnd v0.16.0-beta
+	github.com/lightningnetwork/lnd v0.15.0-beta
 	go.etcd.io/bbolt v1.3.6
+	golang.org/x/mobile v0.0.0-20230301163155-e0f57694e12c
 )
+
+require github.com/lightninglabs/neutrino v0.15.0 // indirect
 
 require (
 	github.com/aead/chacha20 v0.0.0-20180709150244-8b13a72661da // indirect
@@ -76,7 +79,6 @@ require (
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/lib/pq v1.10.3 // indirect
 	github.com/lightninglabs/gozmq v0.0.0-20191113021534-d20a764486bf // indirect
-	github.com/lightninglabs/neutrino v0.15.0 // indirect
 	github.com/lightningnetwork/lightning-onion v1.2.1-0.20221202012345-ca23184850a1 // indirect
 	github.com/lightningnetwork/lnd/clock v1.1.0 // indirect
 	github.com/lightningnetwork/lnd/healthcheck v1.2.2 // indirect
@@ -130,13 +132,13 @@ require (
 	go.uber.org/zap v1.17.0 // indirect
 	golang.org/x/crypto v0.8.0 // indirect
 	golang.org/x/exp v0.0.0-20221111094246-ab4555d3164f // indirect
-	golang.org/x/mod v0.8.0 // indirect
+	golang.org/x/mod v0.10.0 // indirect
 	golang.org/x/net v0.9.0 // indirect
 	golang.org/x/sys v0.7.0 // indirect
 	golang.org/x/term v0.7.0 // indirect
 	golang.org/x/text v0.9.0 // indirect
 	golang.org/x/time v0.0.0-20210220033141-f8bda1e9f3ba // indirect
-	golang.org/x/tools v0.6.0 // indirect
+	golang.org/x/tools v0.8.0 // indirect
 	google.golang.org/genproto v0.0.0-20210617175327-b9e0b3197ced // indirect
 	google.golang.org/grpc v1.50.1 // indirect
 	google.golang.org/protobuf v1.27.1 // indirect
@@ -165,6 +167,5 @@ replace (
 	github.com/btcsuite/btcwallet/walletdb => github.com/breez/btcwallet/walletdb v1.4.1-0.20220717090508-739787f948a6
 	github.com/btcsuite/btcwallet/wtxmgr => github.com/breez/btcwallet/wtxmgr v1.5.1-0.20220717090508-739787f948a6
 	github.com/lightninglabs/neutrino => github.com/djkazic/neutrino v1.2.3
+        github.com/lightninglabs/neutrino/cache v1.1.1 => github.com/djkazic/neutrino v1.2.3
 )
-
-exclude github.com/lightninglabs/neutrino/cache v1.1.1
