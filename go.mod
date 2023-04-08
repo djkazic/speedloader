@@ -167,5 +167,5 @@ replace (
 	github.com/btcsuite/btcwallet/walletdb => github.com/breez/btcwallet/walletdb v1.4.1-0.20220717090508-739787f948a6
 	github.com/btcsuite/btcwallet/wtxmgr => github.com/breez/btcwallet/wtxmgr v1.5.1-0.20220717090508-739787f948a6
 	github.com/lightninglabs/neutrino => github.com/djkazic/neutrino v1.2.3
-        github.com/lightninglabs/neutrino/cache v1.1.1 => github.com/djkazic/neutrino v1.2.3
+    github.com/lightninglabs/neutrino/cache v1.1.1 => github.com/djkazic/neutrino v1.2.3
 )
