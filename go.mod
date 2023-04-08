@@ -7,7 +7,6 @@ require (
 	github.com/btcsuite/btcwallet/walletdb v1.4.0
 	github.com/lightningnetwork/lnd v0.15.0-beta
 	go.etcd.io/bbolt v1.3.6
-	golang.org/x/mobile v0.0.0-20230301163155-e0f57694e12c
 )
 
 require github.com/lightninglabs/neutrino v0.15.0 // indirect
@@ -41,6 +40,7 @@ require (
 	github.com/decred/dcrd/lru v1.1.0 // indirect
 	github.com/dsnet/compress v0.0.1 // indirect
 	github.com/dustin/go-humanize v1.0.0 // indirect
+	github.com/dvyukov/go-fuzz v0.0.0-20210602112143-b1f3d6f4ef4e // indirect
 	github.com/fergusstrange/embedded-postgres v1.10.0 // indirect
 	github.com/go-errors/errors v1.0.1 // indirect
 	github.com/gofrs/uuid v4.2.0+incompatible // indirect
@@ -106,7 +106,6 @@ require (
 	github.com/sirupsen/logrus v1.7.0 // indirect
 	github.com/soheilhy/cmux v0.1.5 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
-	github.com/stretchr/objx v0.5.0 // indirect
 	github.com/stretchr/testify v1.8.1 // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7 // indirect
 	github.com/tmc/grpc-websocket-proxy v0.0.0-20201229170055-e5319fda7802 // indirect
@@ -131,7 +130,6 @@ require (
 	go.uber.org/multierr v1.8.0 // indirect
 	go.uber.org/zap v1.17.0 // indirect
 	golang.org/x/crypto v0.8.0 // indirect
-	golang.org/x/exp v0.0.0-20221111094246-ab4555d3164f // indirect
 	golang.org/x/mod v0.10.0 // indirect
 	golang.org/x/net v0.9.0 // indirect
 	golang.org/x/sys v0.7.0 // indirect
@@ -167,5 +165,5 @@ replace (
 	github.com/btcsuite/btcwallet/walletdb => github.com/breez/btcwallet/walletdb v1.4.1-0.20220717090508-739787f948a6
 	github.com/btcsuite/btcwallet/wtxmgr => github.com/breez/btcwallet/wtxmgr v1.5.1-0.20220717090508-739787f948a6
 	github.com/lightninglabs/neutrino => github.com/djkazic/neutrino v1.2.3
-    github.com/lightninglabs/neutrino/cache v1.1.1 => github.com/djkazic/neutrino v1.2.3
+	github.com/lightninglabs/neutrino/cache v1.1.1 => github.com/djkazic/neutrino v1.2.3
 )
