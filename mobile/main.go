@@ -7,17 +7,52 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
+	"strings"
 
-	"github.com/breez/breez/channeldbservice"
+	"github.com/breez/breez/refcount"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"go.etcd.io/bbolt"
 )
 
+const (
+	directoryPattern = "data/graph/{{network}}/"
+)
+
 var (
 	ErrMissingPolicyError = errors.New("missing channel policy")
+	serviceRefCounter     refcount.ReferenceCountable
+	chanDB                *channeldb.DB
 )
+
+func createService(workingDir string) (*channeldb.DB, error) {
+	var err error
+	graphDir := path.Join(workingDir, strings.Replace(directoryPattern, "{{network}}", "mainnet", -1))
+	fmt.Println("creating shared channeldb service.")
+	chanDB, err := channeldb.Open(graphDir,
+		channeldb.OptionSetSyncFreelist(true))
+	if err != nil {
+		fmt.Printf("unable to open channeldb: %v\n", err)
+		return nil, err
+	}
+
+	fmt.Println("channeldb was opened successfuly")
+	return chanDB, err
+}
+
+func release() error {
+	return chanDB.Close()
+}
+
+func newService(workingDir string) (db *channeldb.DB, rel refcount.ReleaseFunc, err error) {
+	chanDB, err = createService(workingDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	return chanDB, release, err
+}
 
 func walkBucket(b *bbolt.Bucket, keypath [][]byte, k, v []byte, seq uint64, fn walkFunc, skip skipFunc) error {
 	if skip != nil && skip(keypath, k, v) {
@@ -212,11 +247,17 @@ func GossipSync() {
 	}
 
 	// Open channel.db as dest
-	chanDB, cleanup, err := channeldbservice.Get("lndsim")
+	// chanDB, cleanup, err := channeldbservice.Get("lndsim")
+	service, release, err := serviceRefCounter.Get(
+		func() (interface{}, refcount.ReleaseFunc, error) {
+			return newService("lndsim")
+		},
+	)
 	if err != nil {
 		panic(err)
 	}
-	defer cleanup()
+	defer release()
+	destDB := service.(*channeldb.DB)
 
 	// Copy buckets
 	bucketsToCopy := map[string]struct{}{
@@ -234,12 +275,12 @@ func GossipSync() {
 		return append(path, string(key))
 	}
 
-	ourNode, err := ourNode(chanDB)
+	ourNode, err := ourNode(destDB)
 	if err != nil {
 		panic(err)
 	}
 
-	kvdbTx, err := chanDB.BeginReadWriteTx()
+	kvdbTx, err := destDB.BeginReadWriteTx()
 	if err != nil {
 		panic(err)
 	}
@@ -260,7 +301,7 @@ func GossipSync() {
 		}
 
 		// add our data to the source db.
-		if err := putOurData(dchanDB, ourNode, channelNodes, channels, policies); err != nil {
+		if err := putOurData(destDB, ourNode, channelNodes, channels, policies); err != nil {
 			panic(err)
 		}
 	}
