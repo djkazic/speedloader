@@ -1,4 +1,4 @@
-package mobile
+package main
 
 import (
 	"encoding/hex"
@@ -217,7 +217,7 @@ func hasSourceNode(tx *bbolt.Tx) bool {
 	return selfPub != nil
 }
 
-func GossipSync() {
+func main() {
 	// Download the breez gossip database
 	breezURL := "https://bt2.breez.technology/mainnet/graph/graph-000c.db"
 	os.MkdirAll("dgraph", 0700)

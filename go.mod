@@ -9,8 +9,6 @@ require (
 	go.etcd.io/bbolt v1.3.6
 )
 
-require github.com/lightninglabs/neutrino v0.15.0 // indirect
-
 require (
 	github.com/aead/chacha20 v0.0.0-20180709150244-8b13a72661da // indirect
 	github.com/aead/siphash v1.0.1 // indirect
@@ -72,6 +70,8 @@ require (
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/lib/pq v1.10.3 // indirect
 	github.com/lightninglabs/gozmq v0.0.0-20191113021534-d20a764486bf // indirect
+	github.com/lightninglabs/neutrino v0.15.0 // indirect
+	github.com/lightninglabs/neutrino/cache v1.1.1 // indirect
 	github.com/lightningnetwork/lightning-onion v1.2.1-0.20221202012345-ca23184850a1 // indirect
 	github.com/lightningnetwork/lnd/clock v1.1.0 // indirect
 	github.com/lightningnetwork/lnd/healthcheck v1.2.2 // indirect
@@ -152,8 +152,6 @@ require (
 
 replace (
 	github.com/breez/breez => github.com/djkazic/breez v0.0.8
-	github.com/btcsuite/btcwallet => github.com/djkazic/btcwallet v0.15.2
-	github.com/btcsuite/btcwallet/walletdb => github.com/breez/btcwallet/walletdb v1.4.1-0.20220717090508-739787f948a6
-	github.com/btcsuite/btcwallet/wtxmgr => github.com/breez/btcwallet/wtxmgr v1.5.1-0.20220717090508-739787f948a6
-	github.com/lightninglabs/neutrino => github.com/djkazic/neutrino v1.2.3
+	github.com/btcsuite/btcwallet => github.com/djkazic/btcwallet v1.5.4
+	github.com/btcsuite/btcwallet/walletdb => github.com/djkazic/btcwallet/walletdb v1.5.4
 )
