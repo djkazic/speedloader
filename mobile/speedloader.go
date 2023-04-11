@@ -1,4 +1,4 @@
-package main
+package lndmobile
 
 import (
 	"encoding/hex"
@@ -25,6 +25,11 @@ var (
 	ErrMissingPolicyError = errors.New("missing channel policy")
 	serviceRefCounter     refcount.ReferenceCountable
 	chanDB                *channeldb.DB
+	bucketsToCopy         = map[string]struct{}{
+		"graph-edge": {},
+		"graph-meta": {},
+		"graph-node": {},
+	}
 )
 
 func createService(workingDir string) (*channeldb.DB, error) {
@@ -155,7 +160,7 @@ func ourData(tx walletdb.ReadWriteTx, ourNode *channeldb.LightningNode) (
 		fromPolicy *channeldb.ChannelEdgePolicy) error {
 
 		if toPolicy == nil || fromPolicy == nil {
-			return ErrMissingPolicyError
+			return nil
 		}
 		nodeMap[hex.EncodeToString(toPolicy.Node.PubKeyBytes[:])] = toPolicy.Node
 		edges = append(edges, channelEdgeInfo)
@@ -182,7 +187,6 @@ func putOurData(chanDB *channeldb.DB, node *channeldb.LightningNode, nodes []*ch
 	edges []*channeldb.ChannelEdgeInfo, policies []*channeldb.ChannelEdgePolicy) error {
 
 	graph := chanDB.ChannelGraph()
-
 	err := graph.SetSourceNode(node)
 	if err != nil {
 		return fmt.Errorf("graph.SetSourceNode(%x): %w", node.PubKeyBytes, err)
@@ -217,53 +221,52 @@ func hasSourceNode(tx *bbolt.Tx) bool {
 	return selfPub != nil
 }
 
-func main() {
+func GossipSync(callback Callback) {
 	// Download the breez gossip database
 	breezURL := "https://bt2.breez.technology/mainnet/graph/graph-000c.db"
-	os.MkdirAll("dgraph", 0700)
-	os.MkdirAll("lndsim", 0700)
-	out, err := os.Create("dgraph/channel.db")
+	os.MkdirAll("/sdcard/Android/data/com.blixtwallet/cache/dgraph", 0777)
+	out, err := os.Create("/sdcard/Android/data/com.blixtwallet/cache/dgraph/channel.db")
 	if err != nil {
-		panic(err)
+		callback.OnError(err)
+		return
 	}
 	resp, err := http.Get(breezURL)
 	if err != nil {
-		panic(err)
+		callback.OnError(err)
+		return
 	}
-	n, err := io.Copy(out, resp.Body)
+	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		callback.OnError(err)
+		return
+	}
 	out.Close()
 	resp.Body.Close()
-	fmt.Printf("Download complete, %d bytes\n", n)
-
-	// Open dgraph.db as source
-	dchanDB, err := channeldb.Open("dgraph")
-	if err != nil {
-		panic(err)
-	}
-	defer dchanDB.Close()
-	sourceDB, err := bdb.UnderlineDB(dchanDB.Backend)
-	if err != nil {
-		panic(err)
-	}
 
 	// Open channel.db as dest
-	// chanDB, cleanup, err := channeldbservice.Get("lndsim")
 	service, release, err := serviceRefCounter.Get(
 		func() (interface{}, refcount.ReleaseFunc, error) {
-			return newService("lndsim")
+			return newService("/data/data/com.blixtwallet/files")
 		},
 	)
 	if err != nil {
-		panic(err)
+		callback.OnError(err)
+		return
 	}
 	defer release()
 	destDB := service.(*channeldb.DB)
 
-	// Copy buckets
-	bucketsToCopy := map[string]struct{}{
-		"graph-edge": {},
-		"graph-meta": {},
-		"graph-node": {},
+	// Open dgraph.db as source
+	dchanDB, err := channeldb.Open("/sdcard/Android/data/com.blixtwallet/cache/dgraph")
+	if err != nil {
+		callback.OnError(err)
+		return
+	}
+	defer dchanDB.Close()
+	sourceDB, err := bdb.UnderlineDB(dchanDB.Backend)
+	if err != nil {
+		callback.OnError(err)
+		return
 	}
 
 	// utility function to convert bolts key to a string path.
@@ -274,45 +277,47 @@ func main() {
 		}
 		return append(path, string(key))
 	}
-
 	ourNode, err := ourNode(destDB)
 	if err != nil {
-		panic(err)
+		callback.OnError(err)
+		return
 	}
-
 	kvdbTx, err := destDB.BeginReadWriteTx()
 	if err != nil {
-		panic(err)
+		callback.OnError(err)
+		return
 	}
 	tx, err := bdb.UnderlineTX(kvdbTx)
 	if err != nil {
-		panic(err)
+		callback.OnError(err)
+		return
 	}
 	defer tx.Rollback()
-
 	if ourNode == nil && hasSourceNode(tx) {
-		panic(errors.New("source node was set before sync transaction, rolling back"))
+		callback.OnError(err)
+		return
+		//errors.New("source node was set before sync transaction, rolling back").Error()
 	}
-
 	if ourNode != nil {
 		channelNodes, channels, policies, err := ourData(kvdbTx, ourNode)
 		if err != nil {
-			panic(err)
+			callback.OnError(err)
+			return
 		}
 
 		// add our data to the source db.
-		if err := putOurData(destDB, ourNode, channelNodes, channels, policies); err != nil {
-			panic(err)
+		if err := putOurData(dchanDB, ourNode, channelNodes, channels, policies); err != nil {
+			callback.OnError(err)
+			return
 		}
 	}
 	// clear graph data from the destination db
 	for b := range bucketsToCopy {
 		if err := tx.DeleteBucket([]byte(b)); err != nil && err != bbolt.ErrBucketNotFound {
-			panic(err)
+			callback.OnError(err)
+			return
 		}
 	}
-
-	fmt.Println("Merging")
 	err = merge(tx, sourceDB,
 		func(keyPath [][]byte, k []byte, v []byte) bool {
 			pathElements := extractPathElements(keyPath, k)
@@ -320,7 +325,8 @@ func main() {
 			return !shouldCopy
 		})
 	if err != nil {
-		panic(err)
+		callback.OnError(err)
+		return
 	}
-	fmt.Printf("Done! commit=%v\n", tx.Commit())
+	callback.OnResponse([]byte(fmt.Sprintf("done_commit_err=%v", tx.Commit())))
 }
