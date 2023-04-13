@@ -1,6 +1,7 @@
 package lndmobile
 
 import (
+	"compress/gzip"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -9,7 +10,9 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 
+	"github.com/andybalholm/brotli"
 	"github.com/breez/breez/refcount"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/walletdb/bdb"
@@ -19,6 +22,8 @@ import (
 
 const (
 	directoryPattern = "data/graph/{{network}}/"
+	dgraphPath       = "/sdcard/Android/data/com.blixtwallet/cache/dgraph/channel.db"
+	lastRunPath      = "/sdcard/Android/data/com.blixtwallet/cache/lastrun"
 )
 
 var (
@@ -221,27 +226,87 @@ func hasSourceNode(tx *bbolt.Tx) bool {
 	return selfPub != nil
 }
 
+func fileExists(filename string) bool {
+	info, err := os.Stat(filename)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return !info.IsDir()
+}
+
 func GossipSync(callback Callback) {
-	// Download the breez gossip database
-	breezURL := "https://bt2.breez.technology/mainnet/graph/graph-000c.db"
-	os.MkdirAll("/sdcard/Android/data/com.blixtwallet/cache/dgraph", 0777)
-	out, err := os.Create("/sdcard/Android/data/com.blixtwallet/cache/dgraph/channel.db")
-	if err != nil {
-		callback.OnError(err)
-		return
+	var (
+		firstRun  bool
+		useDGraph bool
+	)
+	info, err := os.Stat(dgraphPath)
+	if err == nil {
+		modifiedTime := info.ModTime()
+		now := time.Now()
+		diff := modifiedTime.Sub(now)
+		if diff.Hours() <= 24 {
+			useDGraph = true
+		}
 	}
-	resp, err := http.Get(breezURL)
-	if err != nil {
-		callback.OnError(err)
-		return
+	// Check lastRun info
+	if !fileExists(lastRunPath) {
+		os.Create(lastRunPath)
+		firstRun = true
 	}
-	_, err = io.Copy(out, resp.Body)
-	if err != nil {
-		callback.OnError(err)
-		return
+	lastRun, err := os.Stat(lastRunPath)
+	if err == nil {
+		modifiedTime := lastRun.ModTime()
+		now := time.Now()
+		diff := modifiedTime.Sub(now)
+		if !firstRun && diff.Hours() <= 24 {
+			// Abort
+			callback.OnResponse([]byte("skip_time_constraint"))
+			return
+		}
 	}
-	out.Close()
-	resp.Body.Close()
+
+	if !useDGraph {
+		// Download the breez gossip database
+		breezURL := "https://maps.eldamar.icu/mainnet/graph/graph-001d.db"
+		os.MkdirAll("/sdcard/Android/data/com.blixtwallet/cache/dgraph", 0777)
+		out, err := os.Create(dgraphPath)
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
+		client := new(http.Client)
+		req, err := http.NewRequest("GET", breezURL, nil)
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
+		req.Header.Add("Accept-Encoding", "br, gzip")
+		resp, err := client.Do(req)
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
+		var reader io.Reader
+		switch resp.Header.Get("Content-Encoding") {
+		case "gzip":
+			reader, err = gzip.NewReader(resp.Body)
+			if err != nil {
+				callback.OnError(err)
+				return
+			}
+		case "br":
+			reader = brotli.NewReader(resp.Body)
+		default:
+			reader = resp.Body
+		}
+		_, err = io.Copy(out, reader)
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
+		out.Close()
+		resp.Body.Close()
+	}
 
 	// Open channel.db as dest
 	service, release, err := serviceRefCounter.Get(
@@ -328,5 +393,5 @@ func GossipSync(callback Callback) {
 		callback.OnError(err)
 		return
 	}
-	callback.OnResponse([]byte(fmt.Sprintf("done_commit_err=%v", tx.Commit())))
+	callback.OnResponse([]byte(fmt.Sprintf("dl=%t,done_commit_err=%v", !useDGraph, tx.Commit())))
 }
