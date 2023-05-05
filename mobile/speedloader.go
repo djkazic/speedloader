@@ -232,7 +232,7 @@ func fileExists(filename string) bool {
 	return !info.IsDir()
 }
 
-func GossipSync(cacheDir string, callback Callback) {
+func GossipSync(cacheDir string, dataDir string, callback Callback) {
 	var (
 		firstRun  bool
 		useDGraph bool
@@ -311,7 +311,7 @@ func GossipSync(cacheDir string, callback Callback) {
 	// Open channel.db as dest
 	service, release, err := serviceRefCounter.Get(
 		func() (interface{}, refcount.ReleaseFunc, error) {
-			return newService("/data/data/com.blixtwallet/files")
+			return newService(dataDir)
 		},
 	)
 	if err != nil {
