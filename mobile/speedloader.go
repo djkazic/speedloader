@@ -22,8 +22,6 @@ import (
 
 const (
 	directoryPattern = "data/graph/{{network}}/"
-	dgraphPath       = "/sdcard/Android/data/com.blixtwallet/cache/dgraph/channel.db"
-	lastRunPath      = "/sdcard/Android/data/com.blixtwallet/cache/lastrun"
 )
 
 var (
@@ -234,11 +232,12 @@ func fileExists(filename string) bool {
 	return !info.IsDir()
 }
 
-func GossipSync(callback Callback) {
+func GossipSync(cacheDir string, callback Callback) {
 	var (
 		firstRun  bool
 		useDGraph bool
 	)
+	dgraphPath := cacheDir + "/dgraph/channel.db"
 	info, err := os.Stat(dgraphPath)
 	if err == nil {
 		modifiedTime := info.ModTime()
@@ -249,6 +248,7 @@ func GossipSync(callback Callback) {
 		}
 	}
 	// Check lastRun info
+	lastRunPath := cacheDir + "/lastrun"
 	if !fileExists(lastRunPath) {
 		os.Create(lastRunPath)
 		firstRun = true
@@ -268,7 +268,7 @@ func GossipSync(callback Callback) {
 	if !useDGraph {
 		// Download the breez gossip database
 		breezURL := "https://maps.eldamar.icu/mainnet/graph/graph-001d.db"
-		os.MkdirAll("/sdcard/Android/data/com.blixtwallet/cache/dgraph", 0777)
+		os.MkdirAll(cacheDir+"/dgraph", 0777)
 		out, err := os.Create(dgraphPath)
 		if err != nil {
 			callback.OnError(err)
@@ -322,7 +322,7 @@ func GossipSync(callback Callback) {
 	destDB := service.(*channeldb.DB)
 
 	// Open dgraph.db as source
-	dchanDB, err := channeldb.Open("/sdcard/Android/data/com.blixtwallet/cache/dgraph")
+	dchanDB, err := channeldb.Open(cacheDir + "/dgraph")
 	if err != nil {
 		callback.OnError(err)
 		return
