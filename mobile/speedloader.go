@@ -242,7 +242,7 @@ func GossipSync(cacheDir string, dataDir string, callback Callback) {
 	if err == nil {
 		modifiedTime := info.ModTime()
 		now := time.Now()
-		diff := modifiedTime.Sub(now)
+		diff := now.Sub(modifiedTime)
 		if diff.Hours() <= 24 {
 			useDGraph = true
 		}
