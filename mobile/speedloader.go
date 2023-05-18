@@ -265,6 +265,7 @@ func GossipSync(cacheDir string, dataDir string, callback Callback) {
 		}
 	}
 	// If the lastRun file exists, change its modified time
+	_, err = os.Stat(dgraphPath)
 	now := time.Now()
 	if os.IsExist(err) {
 		err = os.Chtimes(lastRunPath, now, now)
