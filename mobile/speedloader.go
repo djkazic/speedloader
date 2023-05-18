@@ -264,6 +264,15 @@ func GossipSync(cacheDir string, dataDir string, callback Callback) {
 			return
 		}
 	}
+	// If the lastRun file exists, change its modified time
+	now := time.Now()
+	if os.IsExist(err) {
+		err = os.Chtimes(lastRunPath, now, now)
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
+	}
 
 	if !useDGraph {
 		// Download the breez gossip database
