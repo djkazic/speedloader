@@ -264,16 +264,6 @@ func GossipSync(cacheDir string, dataDir string, callback Callback) {
 			return
 		}
 	}
-	// If the lastRun file exists, change its modified time
-	_, err = os.Stat(dgraphPath)
-	now := time.Now()
-	if os.IsExist(err) {
-		err = os.Chtimes(lastRunPath, now, now)
-		if err != nil {
-			callback.OnError(err)
-			return
-		}
-	}
 
 	if !useDGraph {
 		// Download the breez gossip database
@@ -399,6 +389,13 @@ func GossipSync(cacheDir string, dataDir string, callback Callback) {
 			_, shouldCopy := bucketsToCopy[pathElements[0]]
 			return !shouldCopy
 		})
+	if err != nil {
+		callback.OnError(err)
+		return
+	}
+	// Update the lastrun modified time
+	now := time.Now()
+	err = os.Chtimes(lastRunPath, now, now)
 	if err != nil {
 		callback.OnError(err)
 		return
