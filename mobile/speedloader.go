@@ -231,7 +231,7 @@ func fileExists(filename string) bool {
 	return !info.IsDir()
 }
 
-func GossipSync(cacheDir string, dataDir string, callback Callback) {
+func GossipSync(cacheDir string, dataDir string, networkType string, callback Callback) {
 	var (
 		firstRun  bool
 		useDGraph bool
@@ -264,7 +264,7 @@ func GossipSync(cacheDir string, dataDir string, callback Callback) {
 		}
 	}
 
-	if !useDGraph {
+	if !useDGraph && networkType == "wifi" {
 		// Download the breez gossip database
 		breezURL := "https://maps.eldamar.icu/mainnet/graph/graph-001d.db"
 		os.MkdirAll(cacheDir+"/dgraph", 0777)
