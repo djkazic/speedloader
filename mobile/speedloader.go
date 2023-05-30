@@ -30,7 +30,6 @@ var (
 	chanDB                *channeldb.DB
 	bucketsToCopy         = map[string]struct{}{
 		"graph-edge": {},
-		"graph-meta": {},
 		"graph-node": {},
 	}
 )
