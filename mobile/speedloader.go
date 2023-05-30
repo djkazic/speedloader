@@ -246,6 +246,10 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 			useDGraph = true
 		}
 	}
+        // Check network type
+        if networkType != "wifi" || networkType != "ethernet" {
+                useDGraph = true
+        }
 	// Check lastRun info
 	lastRunPath := cacheDir + "/lastrun"
 	if !fileExists(lastRunPath) {
@@ -264,7 +268,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 		}
 	}
 
-	if !useDGraph && networkType == "wifi" {
+	if !useDGraph {
 		// Download the breez gossip database
 		breezURL := "https://maps.eldamar.icu/mainnet/graph/graph-001d.db"
 		os.MkdirAll(cacheDir+"/dgraph", 0777)
