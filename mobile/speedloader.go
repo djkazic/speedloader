@@ -238,19 +238,25 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 	)
 	dgraphPath := cacheDir + "/dgraph/channel.db"
 	info, err := os.Stat(dgraphPath)
+	// check the modified time on the existing downloaded channel.db, see if it is <= 48h old
 	if err == nil {
 		modifiedTime := info.ModTime()
 		now := time.Now()
 		diff := now.Sub(modifiedTime)
-		if diff.Hours() <= 24 {
+		if diff.Hours() <= 48 {
+			// abort downloading the graph, we have a fresh-enough downloaded graph
 			useDGraph = true
 		}
 	}
-        // Check network type
-        if networkType != "wifi" || networkType != "ethernet" {
-                useDGraph = true
-        }
-	// Check lastRun info
+	if !useDGraph {
+		// we have a stale downloaded graph (older than 48h)
+		// check network type in preparation for DL
+		if networkType != "wifi" && networkType != "ethernet" {
+			// abort downloading the graph, we are on metered networking
+			useDGraph = true
+		}
+	}
+	// check lastRun time, return early if we ran too recently
 	lastRunPath := cacheDir + "/lastrun"
 	if !fileExists(lastRunPath) {
 		os.Create(lastRunPath)
@@ -262,14 +268,15 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 		now := time.Now()
 		diff := now.Sub(modifiedTime)
 		if !firstRun && diff.Hours() <= 24 {
-			// Abort
+			// this is not the first run and
+			// we have run speedloader within the last 24h, abort
 			callback.OnResponse([]byte("skip_time_constraint"))
 			return
 		}
 	}
-
+	// if the dgraph is not usable
 	if !useDGraph {
-		// Download the breez gossip database
+		// download the breez gossip database
 		breezURL := "https://maps.eldamar.icu/mainnet/graph/graph-001d.db"
 		os.MkdirAll(cacheDir+"/dgraph", 0777)
 		out, err := os.Create(dgraphPath)
@@ -310,8 +317,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 		out.Close()
 		resp.Body.Close()
 	}
-
-	// Open channel.db as dest
+	// open channel.db as dest
 	service, release, err := serviceRefCounter.Get(
 		func() (interface{}, refcount.ReleaseFunc, error) {
 			return newService(dataDir)
@@ -323,8 +329,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 	}
 	defer release()
 	destDB := service.(*channeldb.DB)
-
-	// Open dgraph.db as source
+	// open dgraph.db as source
 	dchanDB, err := channeldb.Open(cacheDir + "/dgraph")
 	if err != nil {
 		callback.OnError(err)
@@ -336,7 +341,6 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 		callback.OnError(err)
 		return
 	}
-
 	// utility function to convert bolts key to a string path.
 	extractPathElements := func(bytesPath [][]byte, key []byte) []string {
 		var path []string
@@ -396,7 +400,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 		callback.OnError(err)
 		return
 	}
-	// Update the lastrun modified time
+	// update the lastrun modified time
 	now := time.Now()
 	err = os.Chtimes(lastRunPath, now, now)
 	if err != nil {
