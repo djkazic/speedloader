@@ -311,13 +311,10 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 			sum := md5h.Sum(nil)
 			calculatedChecksum := hex.EncodeToString(sum)
 			if checksumValue != calculatedChecksum {
-				// failed checksum check
-				// delete dgraph file
-				err := os.Remove(dgraphPath)
-				if err != nil {
-					callback.OnError(err)
-					return
-				}
+				// failed checksum check (existing file)
+				// unconditionally try to delete dgraph file and lastRun
+				os.Remove(dgraphPath)
+				os.Remove(lastRunPath)
 			} else {
 				// checksum matches
 				// now check modtime
@@ -394,14 +391,9 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 		sum := md5h.Sum(nil)
 		calculatedChecksum := hex.EncodeToString(sum)
 		if checksumValue != calculatedChecksum {
-			// failed checksum check
-			// delete dgraph file
-			err := os.Remove(dgraphPath)
-			if err != nil {
-				callback.OnError(err)
-				return
-			}
-			// also unconditionally remove lastRun
+			// failed checksum check (just downloaded file)
+			// unconditionally remove dgraph file and lastRun
+			os.Remove(dgraphPath)
 			os.Remove(lastRunPath)
 			callback.OnResponse([]byte("skip_checksum_failed"))
 			return
