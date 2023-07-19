@@ -489,6 +489,9 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 	}
 	// update the lastrun modified time
 	now := time.Now()
+	if !fileExists(lastRunPath) {
+		os.Create(lastRunPath)
+	}
 	err = os.Chtimes(lastRunPath, now, now)
 	if err != nil {
 		callback.OnError(err)
