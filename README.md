@@ -11,3 +11,5 @@ replace github.com/btcsuite/btcwallet => github.com/djkazic/btcwallet v1.5.4
 
 replace github.com/btcsuite/btcwallet/walletdb => github.com/djkazic/btcwallet/walletdb v1.5.4
 ```
+
+then run `go mod tidy`
