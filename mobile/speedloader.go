@@ -233,6 +233,47 @@ func fileExists(filename string) bool {
 	return !info.IsDir()
 }
 
+func downloadGraph(cacheDir string, dgraphPath string, breezURL string, callback Callback) {
+	os.MkdirAll(cacheDir+"/dgraph", 0777)
+	out, err := os.Create(dgraphPath)
+	if err != nil {
+		callback.OnError(err)
+		return
+	}
+	client := new(http.Client)
+	req, err := http.NewRequest("GET", breezURL, nil)
+	if err != nil {
+		callback.OnError(err)
+		return
+	}
+	req.Header.Add("Accept-Encoding", "br, gzip")
+	resp, err := client.Do(req)
+	if err != nil {
+		callback.OnError(err)
+		return
+	}
+	var reader io.Reader
+	switch resp.Header.Get("Content-Encoding") {
+	case "gzip":
+		reader, err = gzip.NewReader(resp.Body)
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
+	case "br":
+		reader = brotli.NewReader(resp.Body)
+	default:
+		reader = resp.Body
+	}
+	_, err = io.Copy(out, reader)
+	if err != nil {
+		callback.OnError(err)
+		return
+	}
+	out.Close()
+	resp.Body.Close()
+}
+
 func GossipSync(cacheDir string, dataDir string, networkType string, callback Callback) {
 	var (
 		firstRun      bool
@@ -315,6 +356,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 				// unconditionally try to delete dgraph file and lastRun
 				os.Remove(dgraphPath)
 				os.Remove(lastRunPath)
+				downloadGraph(cacheDir, dgraphPath, breezURL, callback)
 			} else {
 				// checksum matches
 				// now check modtime
@@ -338,44 +380,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 	// if the dgraph is not usable
 	if !useDGraph {
 		// download the breez gossip database
-		os.MkdirAll(cacheDir+"/dgraph", 0777)
-		out, err := os.Create(dgraphPath)
-		if err != nil {
-			callback.OnError(err)
-			return
-		}
-		client := new(http.Client)
-		req, err := http.NewRequest("GET", breezURL, nil)
-		if err != nil {
-			callback.OnError(err)
-			return
-		}
-		req.Header.Add("Accept-Encoding", "br, gzip")
-		resp, err := client.Do(req)
-		if err != nil {
-			callback.OnError(err)
-			return
-		}
-		var reader io.Reader
-		switch resp.Header.Get("Content-Encoding") {
-		case "gzip":
-			reader, err = gzip.NewReader(resp.Body)
-			if err != nil {
-				callback.OnError(err)
-				return
-			}
-		case "br":
-			reader = brotli.NewReader(resp.Body)
-		default:
-			reader = resp.Body
-		}
-		_, err = io.Copy(out, reader)
-		if err != nil {
-			callback.OnError(err)
-			return
-		}
-		out.Close()
-		resp.Body.Close()
+		downloadGraph(cacheDir, dgraphPath, breezURL, callback)
 		fh, err := os.Open(dgraphPath)
 		if err != nil {
 			callback.OnError(err)
