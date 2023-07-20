@@ -233,32 +233,28 @@ func fileExists(filename string) bool {
 	return !info.IsDir()
 }
 
-func downloadGraph(cacheDir string, dgraphPath string, breezURL string, callback Callback) {
+func downloadGraph(cacheDir string, dgraphPath string, breezURL string) error {
 	os.MkdirAll(cacheDir+"/dgraph", 0777)
 	out, err := os.Create(dgraphPath)
 	if err != nil {
-		callback.OnError(err)
-		return
+		return err
 	}
 	client := new(http.Client)
 	req, err := http.NewRequest("GET", breezURL, nil)
 	if err != nil {
-		callback.OnError(err)
-		return
+		return err
 	}
 	req.Header.Add("Accept-Encoding", "br, gzip")
 	resp, err := client.Do(req)
 	if err != nil {
-		callback.OnError(err)
-		return
+		return err
 	}
 	var reader io.Reader
 	switch resp.Header.Get("Content-Encoding") {
 	case "gzip":
 		reader, err = gzip.NewReader(resp.Body)
 		if err != nil {
-			callback.OnError(err)
-			return
+			return err
 		}
 	case "br":
 		reader = brotli.NewReader(resp.Body)
@@ -267,11 +263,11 @@ func downloadGraph(cacheDir string, dgraphPath string, breezURL string, callback
 	}
 	_, err = io.Copy(out, reader)
 	if err != nil {
-		callback.OnError(err)
-		return
+		return err
 	}
 	out.Close()
 	resp.Body.Close()
+	return nil
 }
 
 func GossipSync(cacheDir string, dataDir string, networkType string, callback Callback) {
@@ -336,6 +332,9 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 			checksumValue = hash
 		}
 	}
+	if networkType != "wifi" && networkType != "ethernet" {
+		useDGraph = true
+	}
 	if checksumValue != "" {
 		// we have a valid checksum
 		fh, openErr := os.Open(dgraphPath)
@@ -356,7 +355,13 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 				// unconditionally try to delete dgraph file and lastRun
 				os.Remove(dgraphPath)
 				os.Remove(lastRunPath)
-				downloadGraph(cacheDir, dgraphPath, breezURL, callback)
+				if !useDGraph {
+					err = downloadGraph(cacheDir, dgraphPath, breezURL)
+					if err != nil {
+						callback.OnError(err)
+						return
+					}
+				}
 			} else {
 				// checksum matches
 				// now check modtime
@@ -374,13 +379,14 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 			}
 		}
 	}
-	if networkType != "wifi" && networkType != "ethernet" {
-		useDGraph = true
-	}
 	// if the dgraph is not usable
 	if !useDGraph {
 		// download the breez gossip database
-		downloadGraph(cacheDir, dgraphPath, breezURL, callback)
+		err = downloadGraph(cacheDir, dgraphPath, breezURL)
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
 		fh, err := os.Open(dgraphPath)
 		if err != nil {
 			callback.OnError(err)
@@ -491,8 +497,10 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 	now := time.Now()
 	if !fileExists(lastRunPath) {
 		_, err = os.Create(lastRunPath)
-		callback.OnError(err)
-		return
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
 	}
 	err = os.Chtimes(lastRunPath, now, now)
 	if err != nil {
