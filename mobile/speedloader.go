@@ -233,20 +233,34 @@ func fileExists(filename string) bool {
 	return !info.IsDir()
 }
 
-func downloadGraph(cacheDir string, dgraphPath string, breezURL string) error {
+func downloadGraph(cacheDir string, dgraphPath string, logPath string, breezURL string) error {
 	os.MkdirAll(cacheDir+"/dgraph", 0777)
+	os.MkdirAll(cacheDir+"/log", 0777)
+	log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0777)
+	if err != nil {
+		return err
+	}
 	out, err := os.Create(dgraphPath)
 	if err != nil {
+		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
+			return err
+		}
 		return err
 	}
 	client := new(http.Client)
 	req, err := http.NewRequest("GET", breezURL, nil)
 	if err != nil {
+		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
+			return err
+		}
 		return err
 	}
 	req.Header.Add("Accept-Encoding", "br, gzip")
 	resp, err := client.Do(req)
 	if err != nil {
+		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
+			return err
+		}
 		return err
 	}
 	var reader io.Reader
@@ -254,6 +268,9 @@ func downloadGraph(cacheDir string, dgraphPath string, breezURL string) error {
 	case "gzip":
 		reader, err = gzip.NewReader(resp.Body)
 		if err != nil {
+			if _, err = log.WriteString(err.Error() + "\n"); err != nil {
+				return err
+			}
 			return err
 		}
 	case "br":
@@ -263,6 +280,9 @@ func downloadGraph(cacheDir string, dgraphPath string, breezURL string) error {
 	}
 	_, err = io.Copy(out, reader)
 	if err != nil {
+		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
+			return err
+		}
 		return err
 	}
 	out.Close()
@@ -275,6 +295,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 		firstRun      bool
 		useDGraph     bool
 		dgraphPath    = cacheDir + "/dgraph/channel.db"
+		logPath       = cacheDir + "/log/speedloader.log"
 		breezURL      = "https://maps.eldamar.icu/mainnet/graph/graph-001d.db"
 		checksumURL   = "https://maps.eldamar.icu/mainnet/graph/MD5SUMS"
 		checksumValue string
@@ -353,13 +374,86 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 			if checksumValue != calculatedChecksum {
 				// failed checksum check (existing file)
 				// unconditionally try to delete dgraph file and lastRun
+				log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0777)
+				if err != nil {
+					callback.OnError(err)
+					return
+				}
+				log.WriteString(fmt.Sprintf("Checksum for existing mismatch. Expected %s got %s, retrying download\n", checksumValue, calculatedChecksum))
 				os.Remove(dgraphPath)
 				os.Remove(lastRunPath)
 				if !useDGraph {
-					err = downloadGraph(cacheDir, dgraphPath, breezURL)
+					// checksum fetching
+					client := new(http.Client)
+					req, err := http.NewRequest("GET", checksumURL, nil)
 					if err != nil {
 						callback.OnError(err)
 						return
+					}
+					resp, err := client.Do(req)
+					if err != nil {
+						callback.OnError(err)
+						return
+					}
+					defer resp.Body.Close()
+					reader := bufio.NewReader(resp.Body)
+					for {
+						line, err := reader.ReadString('\n')
+						if err != nil {
+							if err == io.EOF {
+								break
+							} else {
+								callback.OnError(err)
+								return
+							}
+						}
+						fields := strings.Fields(line)
+						if len(fields) != 2 {
+							callback.OnError(errors.New("unexpected_checksum_line_fmt"))
+							return
+						}
+						filename := fields[1]
+						hash := fields[0]
+						if filename == "graph-001d.db" {
+							checksumValue = hash
+						}
+					}
+					// download retry
+					err = downloadGraph(cacheDir, dgraphPath, logPath, breezURL)
+					if err != nil {
+						callback.OnError(err)
+						return
+					}
+					// recalculate the md5sum of the retry downloaded file we have
+					fh, err := os.Open(dgraphPath)
+					if err != nil {
+						callback.OnError(err)
+						return
+					}
+					defer fh.Close()
+					md5h := md5.New()
+					_, err = io.Copy(md5h, fh)
+					if err != nil {
+						callback.OnError(err)
+						return
+					}
+					sum := md5h.Sum(nil)
+					calculatedChecksum = hex.EncodeToString(sum)
+					if checksumValue != calculatedChecksum {
+						// failed checksum check again
+						// unconditionally remove dgraph file and lastRun and give up
+						log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0777)
+						if err != nil {
+							callback.OnError(err)
+							return
+						}
+						log.WriteString(fmt.Sprintf("Checksum mismatch for redownload, expected %s got %s\n", checksumValue, calculatedChecksum))
+						os.Remove(dgraphPath)
+						os.Remove(lastRunPath)
+						callback.OnResponse([]byte("skip_checksum_failed"))
+						return
+					} else {
+						log.WriteString(fmt.Sprintf("Checksum validated on redownload: %s\n", calculatedChecksum))
 					}
 				}
 			} else {
@@ -382,7 +476,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 	// if the dgraph is not usable
 	if !useDGraph {
 		// download the breez gossip database
-		err = downloadGraph(cacheDir, dgraphPath, breezURL)
+		err = downloadGraph(cacheDir, dgraphPath, logPath, breezURL)
 		if err != nil {
 			callback.OnError(err)
 			return
@@ -404,6 +498,12 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 		if checksumValue != calculatedChecksum {
 			// failed checksum check (just downloaded file)
 			// unconditionally remove dgraph file and lastRun
+			log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0777)
+			if err != nil {
+				callback.OnError(err)
+				return
+			}
+			log.WriteString(fmt.Sprintf("Checksum mismatch, expected %s got %s\n", checksumValue, calculatedChecksum))
 			os.Remove(dgraphPath)
 			os.Remove(lastRunPath)
 			callback.OnResponse([]byte("skip_checksum_failed"))
