@@ -2,6 +2,7 @@ Additional deps:
 
 ## go get deps to add for lnd
 `github.com/andybalholm/brotli`
+`github.com/gabstv/go-bsdiff/pkg/bspatch``
 
 ## go.mod entries to add for lnd
 ```

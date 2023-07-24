@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"path"
@@ -18,6 +19,7 @@ import (
 	"github.com/breez/breez/refcount"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/gabstv/go-bsdiff/pkg/bspatch"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"go.etcd.io/bbolt"
 )
@@ -233,13 +235,85 @@ func fileExists(filename string) bool {
 	return !info.IsDir()
 }
 
-func downloadGraph(cacheDir string, dgraphPath string, logPath string, breezURL string) error {
+func initDirs(cacheDir string) {
 	os.MkdirAll(cacheDir+"/dgraph", 0777)
+	os.MkdirAll(cacheDir+"/usage", 0777)
 	os.MkdirAll(cacheDir+"/log", 0777)
+}
+
+func downloadPatch(cacheDir string, logPath string, dgraphHash string, patchURL string) error {
+	patchPath := cacheDir + "/graph-patch"
 	log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0777)
 	if err != nil {
 		return err
 	}
+	log.WriteString(fmt.Sprintf("Downloading patch for %s\n", dgraphHash))
+	out, err := os.Create(patchPath)
+	if err != nil {
+		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
+			return err
+		}
+		return err
+	}
+	client := new(http.Client)
+	req, err := http.NewRequest("GET", patchURL+dgraphHash+"/graph-patch", nil)
+	if err != nil {
+		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
+			return err
+		}
+		return err
+	}
+	req.Header.Add("Accept-Encoding", "br, gzip")
+	resp, err := client.Do(req)
+	if err != nil {
+		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
+			return err
+		}
+		return err
+	}
+	var reader io.Reader
+	switch resp.Header.Get("Content-Encoding") {
+	case "gzip":
+		reader, err = gzip.NewReader(resp.Body)
+		if err != nil {
+			if _, err = log.WriteString(err.Error() + "\n"); err != nil {
+				return err
+			}
+			return err
+		}
+	case "br":
+		reader = brotli.NewReader(resp.Body)
+	default:
+		reader = resp.Body
+	}
+	if resp.StatusCode == 200 {
+		byteCt, err := io.Copy(out, reader)
+		log.WriteString(fmt.Sprintf("%d bytes written for patch\n", byteCt))
+		fi, err := os.Stat(patchPath)
+		if err != nil {
+			return err
+		}
+		log.WriteString(fmt.Sprintf("%d bytes on disk for patch\n", fi.Size()))
+		if err != nil {
+			if _, err = log.WriteString(err.Error() + "\n"); err != nil {
+				return err
+			}
+			return err
+		}
+		out.Close()
+		resp.Body.Close()
+		return nil
+	} else {
+		return errors.New("failed to download patch")
+	}
+}
+
+func downloadGraph(cacheDir string, dgraphPath string, logPath string, breezURL string) error {
+	log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0777)
+	if err != nil {
+		return err
+	}
+	log.WriteString("Creating new dgraph\n")
 	out, err := os.Create(dgraphPath)
 	if err != nil {
 		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
@@ -278,7 +352,13 @@ func downloadGraph(cacheDir string, dgraphPath string, logPath string, breezURL 
 	default:
 		reader = resp.Body
 	}
-	_, err = io.Copy(out, reader)
+	byteCt, err := io.Copy(out, reader)
+	log.WriteString(fmt.Sprintf("%d bytes written\n", byteCt))
+	fi, err := os.Stat(dgraphPath)
+	if err != nil {
+		return err
+	}
+	log.WriteString(fmt.Sprintf("%d bytes on disk\n", fi.Size()))
 	if err != nil {
 		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
 			return err
@@ -296,7 +376,9 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 		useDGraph     bool
 		dgraphPath    = cacheDir + "/dgraph/channel.db"
 		logPath       = cacheDir + "/log/speedloader.log"
+		usagePath     = cacheDir + "/usage/channel.db"
 		breezURL      = "https://maps.eldamar.icu/mainnet/graph/graph-001d.db"
+		patchURL      = "https://maps.eldamar.icu/mainnet/graph/"
 		checksumURL   = "https://maps.eldamar.icu/mainnet/graph/MD5SUMS"
 		checksumValue string
 	)
@@ -353,32 +435,84 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 			checksumValue = hash
 		}
 	}
-	if networkType != "wifi" && networkType != "ethernet" {
-		useDGraph = true
-	}
+	// In light of the new incremental mode, I'm disabling this
+	// if networkType != "wifi" && networkType != "ethernet" {
+	// 	useDGraph = true
+	// }
+	initDirs(cacheDir)
+	log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0777)
 	if checksumValue != "" {
 		// we have a valid checksum
-		fh, openErr := os.Open(dgraphPath)
 		// do we have a file?
-		if !os.IsNotExist(openErr) {
+		if fileExists(dgraphPath) {
+			log.WriteString("Found existing dgraph\n")
 			// first, calculate the md5sum of the file we have
-			defer fh.Close()
+			var dgraphBytes []byte
 			md5h := md5.New()
+			fh, _ := os.Open(dgraphPath)
 			_, err = io.Copy(md5h, fh)
 			if err != nil {
 				callback.OnError(err)
 				return
 			}
+			defer fh.Close()
 			sum := md5h.Sum(nil)
 			calculatedChecksum := hex.EncodeToString(sum)
-			if checksumValue != calculatedChecksum {
-				// failed checksum check (existing file)
-				// unconditionally try to delete dgraph file and lastRun
-				log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0777)
+			// Seek to beginning
+			_, err = fh.Seek(0, 0)
+			if err != nil {
+				callback.OnError(err)
+				return
+			}
+			dgraphBytes, err := ioutil.ReadAll(fh)
+			if err != nil {
+				callback.OnError(err)
+				return
+			}
+			defer fh.Close()
+			// bsdiff download attempt
+			err = downloadPatch(cacheDir, logPath, calculatedChecksum, patchURL)
+			if err == nil {
+				// patched graph checksum
+				patchPath := cacheDir + "/graph-patch"
+				patch, err := os.Open(patchPath)
+				patchBytes, err := ioutil.ReadAll(patch)
 				if err != nil {
 					callback.OnError(err)
 					return
 				}
+				patch.Close()
+				// apply patch
+				log.WriteString("Patching existing dgraph\n")
+				newGraph, err := bspatch.Bytes(dgraphBytes, patchBytes)
+				if err != nil {
+					callback.OnError(err)
+					return
+				}
+				err = ioutil.WriteFile(dgraphPath, newGraph, 0777)
+				if err != nil {
+					callback.OnError(err)
+					return
+				}
+				log.WriteString("Patched existing dgraph\n")
+				// Recalculate hash
+				md5h := md5.New()
+				ph, _ := os.Open(dgraphPath)
+				_, err = io.Copy(md5h, ph)
+				if err != nil {
+					callback.OnError(err)
+					return
+				}
+				defer ph.Close()
+				sum := md5h.Sum(nil)
+				calculatedChecksum = hex.EncodeToString(sum)
+			} else {
+				log.WriteString(fmt.Sprintf("Patch failed: %s\n", err))
+			}
+
+			if checksumValue != calculatedChecksum {
+				// failed checksum check (existing file)
+				// unconditionally try to delete dgraph file and lastRun
 				log.WriteString(fmt.Sprintf("Checksum for existing mismatch. Expected %s got %s, retrying download\n", checksumValue, calculatedChecksum))
 				os.Remove(dgraphPath)
 				os.Remove(lastRunPath)
@@ -442,11 +576,6 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 					if checksumValue != calculatedChecksum {
 						// failed checksum check again
 						// unconditionally remove dgraph file and lastRun and give up
-						log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0777)
-						if err != nil {
-							callback.OnError(err)
-							return
-						}
 						log.WriteString(fmt.Sprintf("Checksum mismatch for redownload, expected %s got %s\n", checksumValue, calculatedChecksum))
 						os.Remove(dgraphPath)
 						os.Remove(lastRunPath)
@@ -457,6 +586,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 					}
 				}
 			} else {
+				log.WriteString(fmt.Sprintf("Checksum OK %s\n", calculatedChecksum))
 				// checksum matches
 				// now check modtime
 				info, err := os.Stat(dgraphPath)
@@ -473,7 +603,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 			}
 		}
 	}
-	// if the dgraph is not usable
+	// if the dgraph is not usable, download the graph
 	if !useDGraph {
 		// download the breez gossip database
 		err = downloadGraph(cacheDir, dgraphPath, logPath, breezURL)
@@ -498,7 +628,6 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 		if checksumValue != calculatedChecksum {
 			// failed checksum check (just downloaded file)
 			// unconditionally remove dgraph file and lastRun
-			log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0777)
 			if err != nil {
 				callback.OnError(err)
 				return
@@ -508,6 +637,8 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 			os.Remove(lastRunPath)
 			callback.OnResponse([]byte("skip_checksum_failed"))
 			return
+		} else {
+			log.WriteString(fmt.Sprintf("Checksum OK %s\n", calculatedChecksum))
 		}
 	}
 	// open channel.db as dest
@@ -522,8 +653,12 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 	}
 	defer release()
 	destDB := service.(*channeldb.DB)
+	// temporarily copy dgraph to usage dir
+	err = copyFile(dgraphPath, usagePath)
 	// open dgraph.db as source
-	dchanDB, err := channeldb.Open(cacheDir + "/dgraph")
+	dchanDB, err := channeldb.Open(cacheDir + "/usage")
+	defer os.Remove(usagePath)
+	defer dchanDB.Close()
 	if err != nil {
 		callback.OnError(err)
 		return
@@ -608,4 +743,26 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 		return
 	}
 	callback.OnResponse([]byte(fmt.Sprintf("dl=%t,done_commit_err=%v", !useDGraph, tx.Commit())))
+}
+
+func copyFile(srcPath, destPath string) error {
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+	destFile, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+	_, err = io.Copy(destFile, srcFile)
+	if err != nil {
+		return err
+	}
+	err = destFile.Sync()
+	if err != nil {
+		return err
+	}
+	return nil
 }

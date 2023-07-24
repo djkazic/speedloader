@@ -3,8 +3,10 @@ module github.com/djkazic/speedloader
 go 1.20
 
 require (
+	github.com/andybalholm/brotli v1.0.3
 	github.com/breez/breez v0.0.0-20220717152659-09eb13fe2706
 	github.com/btcsuite/btcwallet/walletdb v1.4.0
+	github.com/gabstv/go-bsdiff v1.0.5
 	github.com/lightningnetwork/lnd v0.16.0-beta
 	go.etcd.io/bbolt v1.3.6
 )
@@ -12,7 +14,6 @@ require (
 require (
 	github.com/aead/chacha20 v0.0.0-20180709150244-8b13a72661da // indirect
 	github.com/aead/siphash v1.0.1 // indirect
-	github.com/andybalholm/brotli v1.0.3 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/btcsuite/btcd v0.23.5-0.20230125025938-be056b0a0b2f // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.3.2 // indirect
