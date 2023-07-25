@@ -583,6 +583,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 						return
 					} else {
 						log.WriteString(fmt.Sprintf("Checksum validated on redownload: %s\n", calculatedChecksum))
+						useDGraph = true
 					}
 				}
 			} else {
