@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/andybalholm/brotli"
@@ -38,14 +39,51 @@ var (
 	}
 )
 
-func createService(workingDir string) (*channeldb.DB, error) {
+type Logger struct {
+	file *os.File
+	mu   sync.Mutex // Ensures thread safety
+}
+
+func NewLogger(path string) (*Logger, error) {
+	logFile, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0777)
+	if err != nil {
+		return nil, err
+	}
+	return &Logger{file: logFile}, nil
+}
+
+func (l *Logger) Println(message string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, err := l.file.WriteString(message + "\n")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (l *Logger) Printf(format string, v ...interface{}) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, err := l.file.WriteString(fmt.Sprintf(format, v...) + "\n")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (l *Logger) Close() error {
+	return l.file.Close()
+}
+
+func createService(workingDir string, log *Logger) (*channeldb.DB, error) {
 	var err error
 	graphDir := path.Join(workingDir, strings.Replace(directoryPattern, "{{network}}", "mainnet", -1))
 	fmt.Println("creating shared channeldb service.")
 	chanDB, err := channeldb.Open(graphDir,
 		channeldb.OptionSetSyncFreelist(true))
 	if err != nil {
-		fmt.Printf("unable to open channeldb: %v\n", err)
+		log.Printf("unable to open channeldb: %v", err)
 		return nil, err
 	}
 
@@ -57,8 +95,8 @@ func release() error {
 	return chanDB.Close()
 }
 
-func newService(workingDir string) (db *channeldb.DB, rel refcount.ReleaseFunc, err error) {
-	chanDB, err = createService(workingDir)
+func newService(workingDir string, log *Logger) (db *channeldb.DB, rel refcount.ReleaseFunc, err error) {
+	chanDB, err = createService(workingDir, log)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -241,34 +279,24 @@ func initDirs(cacheDir string) {
 	os.MkdirAll(cacheDir+"/log", 0777)
 }
 
-func downloadPatch(cacheDir string, logPath string, dgraphHash string, patchURL string) error {
+func downloadPatch(cacheDir string, log *Logger, dgraphHash string, patchURL string) error {
 	patchPath := cacheDir + "/graph-patch"
-	log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0777)
-	if err != nil {
-		return err
-	}
-	log.WriteString(fmt.Sprintf("Downloading patch for %s\n", dgraphHash))
+	log.Printf("Downloading patch for %s", dgraphHash)
 	out, err := os.Create(patchPath)
 	if err != nil {
-		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
-			return err
-		}
+		log.Println(err.Error())
 		return err
 	}
 	client := new(http.Client)
 	req, err := http.NewRequest("GET", patchURL+dgraphHash+"/graph-patch", nil)
 	if err != nil {
-		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
-			return err
-		}
+		log.Println(err.Error())
 		return err
 	}
 	req.Header.Add("Accept-Encoding", "br, gzip")
 	resp, err := client.Do(req)
 	if err != nil {
-		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
-			return err
-		}
+		log.Println(err.Error())
 		return err
 	}
 	var reader io.Reader
@@ -276,9 +304,7 @@ func downloadPatch(cacheDir string, logPath string, dgraphHash string, patchURL 
 	case "gzip":
 		reader, err = gzip.NewReader(resp.Body)
 		if err != nil {
-			if _, err = log.WriteString(err.Error() + "\n"); err != nil {
-				return err
-			}
+			log.Println(err.Error())
 			return err
 		}
 	case "br":
@@ -288,16 +314,14 @@ func downloadPatch(cacheDir string, logPath string, dgraphHash string, patchURL 
 	}
 	if resp.StatusCode == 200 {
 		byteCt, err := io.Copy(out, reader)
-		log.WriteString(fmt.Sprintf("%d bytes written for patch\n", byteCt))
+		log.Printf("%d bytes written for patch", byteCt)
 		fi, err := os.Stat(patchPath)
 		if err != nil {
 			return err
 		}
-		log.WriteString(fmt.Sprintf("%d bytes on disk for patch\n", fi.Size()))
+		log.Printf("%d bytes on disk for patch", fi.Size())
 		if err != nil {
-			if _, err = log.WriteString(err.Error() + "\n"); err != nil {
-				return err
-			}
+			log.Println(err.Error())
 			return err
 		}
 		out.Close()
@@ -308,33 +332,23 @@ func downloadPatch(cacheDir string, logPath string, dgraphHash string, patchURL 
 	}
 }
 
-func downloadGraph(cacheDir string, dgraphPath string, logPath string, breezURL string) error {
-	log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0777)
-	if err != nil {
-		return err
-	}
-	log.WriteString("Creating new dgraph\n")
+func downloadGraph(cacheDir string, dgraphPath string, log *Logger, breezURL string) error {
+	log.Println("Creating new dgraph")
 	out, err := os.Create(dgraphPath)
 	if err != nil {
-		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
-			return err
-		}
+		log.Println(err.Error())
 		return err
 	}
 	client := new(http.Client)
 	req, err := http.NewRequest("GET", breezURL, nil)
 	if err != nil {
-		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
-			return err
-		}
+		log.Println(err.Error())
 		return err
 	}
 	req.Header.Add("Accept-Encoding", "br, gzip")
 	resp, err := client.Do(req)
 	if err != nil {
-		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
-			return err
-		}
+		log.Println(err.Error())
 		return err
 	}
 	var reader io.Reader
@@ -342,9 +356,7 @@ func downloadGraph(cacheDir string, dgraphPath string, logPath string, breezURL 
 	case "gzip":
 		reader, err = gzip.NewReader(resp.Body)
 		if err != nil {
-			if _, err = log.WriteString(err.Error() + "\n"); err != nil {
-				return err
-			}
+			log.Println(err.Error())
 			return err
 		}
 	case "br":
@@ -353,16 +365,14 @@ func downloadGraph(cacheDir string, dgraphPath string, logPath string, breezURL 
 		reader = resp.Body
 	}
 	byteCt, err := io.Copy(out, reader)
-	log.WriteString(fmt.Sprintf("%d bytes written\n", byteCt))
+	log.Printf("%d bytes written", byteCt)
 	fi, err := os.Stat(dgraphPath)
 	if err != nil {
 		return err
 	}
-	log.WriteString(fmt.Sprintf("%d bytes on disk\n", fi.Size()))
+	log.Printf("%d bytes on disk", fi.Size())
 	if err != nil {
-		if _, err = log.WriteString(err.Error() + "\n"); err != nil {
-			return err
-		}
+		log.Println(err.Error())
 		return err
 	}
 	out.Close()
@@ -440,12 +450,16 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 	// 	useDGraph = true
 	// }
 	initDirs(cacheDir)
-	log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0777)
+	log, err := NewLogger(logPath)
+	if err != nil {
+		callback.OnError(err)
+		return
+	}
 	if checksumValue != "" {
 		// we have a valid checksum
 		// do we have a file?
 		if fileExists(dgraphPath) {
-			log.WriteString("Found existing dgraph\n")
+			log.Println("Found existing dgraph")
 			// first, calculate the md5sum of the file we have
 			var dgraphBytes []byte
 			md5h := md5.New()
@@ -471,7 +485,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 			}
 			defer fh.Close()
 			// bsdiff download attempt
-			err = downloadPatch(cacheDir, logPath, calculatedChecksum, patchURL)
+			err = downloadPatch(cacheDir, log, calculatedChecksum, patchURL)
 			if err == nil {
 				// patched graph checksum
 				patchPath := cacheDir + "/graph-patch"
@@ -483,7 +497,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 				}
 				patch.Close()
 				// apply patch
-				log.WriteString("Patching existing dgraph\n")
+				log.Println("Patching existing dgraph")
 				newGraph, err := bspatch.Bytes(dgraphBytes, patchBytes)
 				if err != nil {
 					callback.OnError(err)
@@ -494,7 +508,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 					callback.OnError(err)
 					return
 				}
-				log.WriteString("Patched existing dgraph\n")
+				log.Println("Patched existing dgraph")
 				// Recalculate hash
 				md5h := md5.New()
 				ph, _ := os.Open(dgraphPath)
@@ -507,13 +521,13 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 				sum := md5h.Sum(nil)
 				calculatedChecksum = hex.EncodeToString(sum)
 			} else {
-				log.WriteString(fmt.Sprintf("Patch failed: %s\n", err))
+				log.Printf("Patch failed: %s", err)
 			}
 
 			if checksumValue != calculatedChecksum {
 				// failed checksum check (existing file)
 				// unconditionally try to delete dgraph file and lastRun
-				log.WriteString(fmt.Sprintf("Checksum for existing mismatch. Expected %s got %s, retrying download\n", checksumValue, calculatedChecksum))
+				log.Printf("Checksum for existing mismatch. Expected %s got %s, retrying download", checksumValue, calculatedChecksum)
 				os.Remove(dgraphPath)
 				os.Remove(lastRunPath)
 				if !useDGraph {
@@ -553,7 +567,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 						}
 					}
 					// download retry
-					err = downloadGraph(cacheDir, dgraphPath, logPath, breezURL)
+					err = downloadGraph(cacheDir, dgraphPath, log, breezURL)
 					if err != nil {
 						callback.OnError(err)
 						return
@@ -576,18 +590,18 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 					if checksumValue != calculatedChecksum {
 						// failed checksum check again
 						// unconditionally remove dgraph file and lastRun and give up
-						log.WriteString(fmt.Sprintf("Checksum mismatch for redownload, expected %s got %s\n", checksumValue, calculatedChecksum))
+						log.Printf("Checksum mismatch for redownload, expected %s got %s", checksumValue, calculatedChecksum)
 						os.Remove(dgraphPath)
 						os.Remove(lastRunPath)
 						callback.OnResponse([]byte("skip_checksum_failed"))
 						return
 					} else {
-						log.WriteString(fmt.Sprintf("Checksum validated on redownload: %s\n", calculatedChecksum))
+						log.Printf("Checksum validated on redownload: %s", calculatedChecksum)
 						useDGraph = true
 					}
 				}
 			} else {
-				log.WriteString(fmt.Sprintf("Checksum OK %s\n", calculatedChecksum))
+				log.Printf("Checksum OK %s", calculatedChecksum)
 				// checksum matches
 				// now check modtime
 				info, err := os.Stat(dgraphPath)
@@ -607,7 +621,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 	// if the dgraph is not usable, download the graph
 	if !useDGraph {
 		// download the breez gossip database
-		err = downloadGraph(cacheDir, dgraphPath, logPath, breezURL)
+		err = downloadGraph(cacheDir, dgraphPath, log, breezURL)
 		if err != nil {
 			callback.OnError(err)
 			return
@@ -633,19 +647,19 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 				callback.OnError(err)
 				return
 			}
-			log.WriteString(fmt.Sprintf("Checksum mismatch, expected %s got %s\n", checksumValue, calculatedChecksum))
+			log.Printf("Checksum mismatch, expected %s got %s", checksumValue, calculatedChecksum)
 			os.Remove(dgraphPath)
 			os.Remove(lastRunPath)
 			callback.OnResponse([]byte("skip_checksum_failed"))
 			return
 		} else {
-			log.WriteString(fmt.Sprintf("Checksum OK %s\n", calculatedChecksum))
+			log.Printf("Checksum OK %s", calculatedChecksum)
 		}
 	}
 	// open channel.db as dest
 	service, release, err := serviceRefCounter.Get(
 		func() (interface{}, refcount.ReleaseFunc, error) {
-			return newService(dataDir)
+			return newService(dataDir, log)
 		},
 	)
 	if err != nil {
