@@ -380,16 +380,16 @@ func downloadGraph(cacheDir string, dgraphPath string, log *Logger, breezURL str
 	return nil
 }
 
-func GossipSync(cacheDir string, dataDir string, networkType string, callback Callback) {
+func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType string, callback Callback) {
 	var (
 		firstRun      bool
 		useDGraph     bool
 		dgraphPath    = cacheDir + "/dgraph/channel.db"
 		logPath       = cacheDir + "/log/speedloader.log"
 		usagePath     = cacheDir + "/usage/channel.db"
-		breezURL      = "https://maps.eldamar.icu/mainnet/graph/graph-001d.db"
-		patchURL      = "https://maps.eldamar.icu/mainnet/graph/"
-		checksumURL   = "https://maps.eldamar.icu/mainnet/graph/MD5SUMS"
+		breezURL      = serviceUrl + "/mainnet/graph/graph-001d.db"
+		patchURL      = serviceUrl + "/mainnet/graph/"
+		checksumURL   = serviceUrl + "/mainnet/graph/MD5SUMS"
 		checksumValue string
 	)
 	// check lastRun time, return early if we ran too recently
