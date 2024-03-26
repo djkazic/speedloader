@@ -3,6 +3,7 @@ package lndmobile
 import (
 	"bufio"
 	"compress/gzip"
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
@@ -37,11 +38,18 @@ var (
 		"graph-edge": {},
 		"graph-node": {},
 	}
+	globalCtx    context.Context
+	cancelGlobal context.CancelFunc
 )
 
 type Logger struct {
 	file *os.File
 	mu   sync.Mutex // Ensures thread safety
+}
+
+func init() {
+	// Initialize the global context
+	globalCtx, cancelGlobal = context.WithCancel(context.Background())
 }
 
 func NewLogger(path string) (*Logger, error) {
@@ -392,372 +400,384 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 		checksumURL   = serviceUrl + "/mainnet/graph/MD5SUMS"
 		checksumValue string
 	)
-	// check lastRun time, return early if we ran too recently
-	lastRunPath := cacheDir + "/lastrun"
-	if !fileExists(lastRunPath) {
-		os.Create(lastRunPath)
-		firstRun = true
-	}
-	lastRun, err := os.Stat(lastRunPath)
-	if err == nil {
-		modifiedTime := lastRun.ModTime()
-		now := time.Now()
-		diff := now.Sub(modifiedTime)
-		if !firstRun && diff.Hours() <= 24 {
-			// this is not the first run and
-			// we have run speedloader within the last 24h, abort
-			callback.OnResponse([]byte("skip_time_constraint"))
-			return
+
+	select {
+	case <-globalCtx.Done():
+		// Global context cancelled, return early
+		callback.OnError(globalCtx.Err())
+		return
+	default:
+		// check lastRun time, return early if we ran too recently
+		lastRunPath := cacheDir + "/lastrun"
+		if !fileExists(lastRunPath) {
+			os.Create(lastRunPath)
+			firstRun = true
 		}
-	}
-	// checksum fetching
-	client := new(http.Client)
-	req, err := http.NewRequest("GET", checksumURL, nil)
-	if err != nil {
-		callback.OnError(err)
-		return
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		callback.OnError(err)
-		return
-	}
-	defer resp.Body.Close()
-	reader := bufio.NewReader(resp.Body)
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				break
-			} else {
-				callback.OnError(err)
+		lastRun, err := os.Stat(lastRunPath)
+		if err == nil {
+			modifiedTime := lastRun.ModTime()
+			now := time.Now()
+			diff := now.Sub(modifiedTime)
+			if !firstRun && diff.Hours() <= 24 {
+				// this is not the first run and
+				// we have run speedloader within the last 24h, abort
+				callback.OnResponse([]byte("skip_time_constraint"))
 				return
 			}
 		}
-		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			callback.OnError(errors.New("unexpected_checksum_line_fmt"))
+		// checksum fetching
+		client := new(http.Client)
+		req, err := http.NewRequest("GET", checksumURL, nil)
+		if err != nil {
+			callback.OnError(err)
 			return
 		}
-		filename := fields[1]
-		hash := fields[0]
-		if filename == "graph-001d.db" {
-			checksumValue = hash
+		resp, err := client.Do(req)
+		if err != nil {
+			callback.OnError(err)
+			return
 		}
-	}
-	// In light of the new incremental mode, I'm disabling this
-	// if networkType != "wifi" && networkType != "ethernet" {
-	// 	useDGraph = true
-	// }
-	initDirs(cacheDir)
-	log, err := NewLogger(logPath)
-	if err != nil {
-		callback.OnError(err)
-		return
-	}
-	if checksumValue != "" {
-		// we have a valid checksum
-		// do we have a file?
-		if fileExists(dgraphPath) {
-			log.Println("Found existing dgraph")
-			// first, calculate the md5sum of the file we have
-			var dgraphBytes []byte
+		defer resp.Body.Close()
+		reader := bufio.NewReader(resp.Body)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				if err == io.EOF {
+					break
+				} else {
+					callback.OnError(err)
+					return
+				}
+			}
+			fields := strings.Fields(line)
+			if len(fields) != 2 {
+				callback.OnError(errors.New("unexpected_checksum_line_fmt"))
+				return
+			}
+			filename := fields[1]
+			hash := fields[0]
+			if filename == "graph-001d.db" {
+				checksumValue = hash
+			}
+		}
+		// In light of the new incremental mode, I'm disabling this
+		// if networkType != "wifi" && networkType != "ethernet" {
+		// 	useDGraph = true
+		// }
+		initDirs(cacheDir)
+		log, err := NewLogger(logPath)
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
+		if checksumValue != "" {
+			// we have a valid checksum
+			// do we have a file?
+			if fileExists(dgraphPath) {
+				log.Println("Found existing dgraph")
+				// first, calculate the md5sum of the file we have
+				var dgraphBytes []byte
+				md5h := md5.New()
+				fh, _ := os.Open(dgraphPath)
+				_, err = io.Copy(md5h, fh)
+				if err != nil {
+					callback.OnError(err)
+					return
+				}
+				defer fh.Close()
+				sum := md5h.Sum(nil)
+				calculatedChecksum := hex.EncodeToString(sum)
+				// Seek to beginning
+				_, err = fh.Seek(0, 0)
+				if err != nil {
+					callback.OnError(err)
+					return
+				}
+				dgraphBytes, err := ioutil.ReadAll(fh)
+				if err != nil {
+					callback.OnError(err)
+					return
+				}
+				defer fh.Close()
+				// bsdiff download attempt
+				err = downloadPatch(cacheDir, log, calculatedChecksum, patchURL)
+				if err == nil {
+					// patched graph checksum
+					patchPath := cacheDir + "/graph-patch"
+					patch, err := os.Open(patchPath)
+					patchBytes, err := ioutil.ReadAll(patch)
+					if err != nil {
+						callback.OnError(err)
+						return
+					}
+					patch.Close()
+					// apply patch
+					log.Println("Patching existing dgraph")
+					newGraph, err := bspatch.Bytes(dgraphBytes, patchBytes)
+					if err != nil {
+						callback.OnError(err)
+						return
+					}
+					err = ioutil.WriteFile(dgraphPath, newGraph, 0777)
+					if err != nil {
+						callback.OnError(err)
+						return
+					}
+					log.Println("Patched existing dgraph")
+					// Recalculate hash
+					md5h := md5.New()
+					ph, _ := os.Open(dgraphPath)
+					_, err = io.Copy(md5h, ph)
+					if err != nil {
+						callback.OnError(err)
+						return
+					}
+					defer ph.Close()
+					sum := md5h.Sum(nil)
+					calculatedChecksum = hex.EncodeToString(sum)
+				} else {
+					log.Printf("Patch failed: %s", err)
+				}
+
+				if checksumValue != calculatedChecksum {
+					// failed checksum check (existing file)
+					// unconditionally try to delete dgraph file and lastRun
+					log.Printf("Checksum for existing mismatch. Expected %s got %s, retrying download", checksumValue, calculatedChecksum)
+					os.Remove(dgraphPath)
+					os.Remove(lastRunPath)
+					if !useDGraph {
+						// checksum fetching
+						client := new(http.Client)
+						req, err := http.NewRequest("GET", checksumURL, nil)
+						if err != nil {
+							callback.OnError(err)
+							return
+						}
+						resp, err := client.Do(req)
+						if err != nil {
+							callback.OnError(err)
+							return
+						}
+						defer resp.Body.Close()
+						reader := bufio.NewReader(resp.Body)
+						for {
+							line, err := reader.ReadString('\n')
+							if err != nil {
+								if err == io.EOF {
+									break
+								} else {
+									callback.OnError(err)
+									return
+								}
+							}
+							fields := strings.Fields(line)
+							if len(fields) != 2 {
+								callback.OnError(errors.New("unexpected_checksum_line_fmt"))
+								return
+							}
+							filename := fields[1]
+							hash := fields[0]
+							if filename == "graph-001d.db" {
+								checksumValue = hash
+							}
+						}
+						// download retry
+						err = downloadGraph(cacheDir, dgraphPath, log, breezURL)
+						if err != nil {
+							callback.OnError(err)
+							return
+						}
+						// recalculate the md5sum of the retry downloaded file we have
+						fh, err := os.Open(dgraphPath)
+						if err != nil {
+							callback.OnError(err)
+							return
+						}
+						defer fh.Close()
+						md5h := md5.New()
+						_, err = io.Copy(md5h, fh)
+						if err != nil {
+							callback.OnError(err)
+							return
+						}
+						sum := md5h.Sum(nil)
+						calculatedChecksum = hex.EncodeToString(sum)
+						if checksumValue != calculatedChecksum {
+							// failed checksum check again
+							// unconditionally remove dgraph file and lastRun and give up
+							log.Printf("Checksum mismatch for redownload, expected %s got %s", checksumValue, calculatedChecksum)
+							os.Remove(dgraphPath)
+							os.Remove(lastRunPath)
+							callback.OnResponse([]byte("skip_checksum_failed"))
+							return
+						} else {
+							log.Printf("Checksum validated on redownload: %s", calculatedChecksum)
+							useDGraph = true
+						}
+					}
+				} else {
+					log.Printf("Checksum OK %s", calculatedChecksum)
+					// checksum matches
+					// now check modtime
+					info, err := os.Stat(dgraphPath)
+					// check the modified time on the existing downloaded channel.db, see if it is <= 48h old
+					if err == nil {
+						modifiedTime := info.ModTime()
+						now := time.Now()
+						diff := now.Sub(modifiedTime)
+						if diff.Hours() <= 48 {
+							// abort downloading the graph, we have a fresh-enough downloaded graph
+							useDGraph = true
+						}
+					}
+				}
+			}
+		}
+		// if the dgraph is not usable, download the graph
+		if !useDGraph {
+			// download the breez gossip database
+			err = downloadGraph(cacheDir, dgraphPath, log, breezURL)
+			if err != nil {
+				callback.OnError(err)
+				return
+			}
+			fh, err := os.Open(dgraphPath)
+			if err != nil {
+				callback.OnError(err)
+				return
+			}
+			defer fh.Close()
 			md5h := md5.New()
-			fh, _ := os.Open(dgraphPath)
 			_, err = io.Copy(md5h, fh)
 			if err != nil {
 				callback.OnError(err)
 				return
 			}
-			defer fh.Close()
 			sum := md5h.Sum(nil)
 			calculatedChecksum := hex.EncodeToString(sum)
-			// Seek to beginning
-			_, err = fh.Seek(0, 0)
-			if err != nil {
-				callback.OnError(err)
-				return
-			}
-			dgraphBytes, err := ioutil.ReadAll(fh)
-			if err != nil {
-				callback.OnError(err)
-				return
-			}
-			defer fh.Close()
-			// bsdiff download attempt
-			err = downloadPatch(cacheDir, log, calculatedChecksum, patchURL)
-			if err == nil {
-				// patched graph checksum
-				patchPath := cacheDir + "/graph-patch"
-				patch, err := os.Open(patchPath)
-				patchBytes, err := ioutil.ReadAll(patch)
-				if err != nil {
-					callback.OnError(err)
-					return
-				}
-				patch.Close()
-				// apply patch
-				log.Println("Patching existing dgraph")
-				newGraph, err := bspatch.Bytes(dgraphBytes, patchBytes)
-				if err != nil {
-					callback.OnError(err)
-					return
-				}
-				err = ioutil.WriteFile(dgraphPath, newGraph, 0777)
-				if err != nil {
-					callback.OnError(err)
-					return
-				}
-				log.Println("Patched existing dgraph")
-				// Recalculate hash
-				md5h := md5.New()
-				ph, _ := os.Open(dgraphPath)
-				_, err = io.Copy(md5h, ph)
-				if err != nil {
-					callback.OnError(err)
-					return
-				}
-				defer ph.Close()
-				sum := md5h.Sum(nil)
-				calculatedChecksum = hex.EncodeToString(sum)
-			} else {
-				log.Printf("Patch failed: %s", err)
-			}
-
 			if checksumValue != calculatedChecksum {
-				// failed checksum check (existing file)
-				// unconditionally try to delete dgraph file and lastRun
-				log.Printf("Checksum for existing mismatch. Expected %s got %s, retrying download", checksumValue, calculatedChecksum)
+				// failed checksum check (just downloaded file)
+				// unconditionally remove dgraph file and lastRun
+				if err != nil {
+					callback.OnError(err)
+					return
+				}
+				log.Printf("Checksum mismatch, expected %s got %s", checksumValue, calculatedChecksum)
 				os.Remove(dgraphPath)
 				os.Remove(lastRunPath)
-				if !useDGraph {
-					// checksum fetching
-					client := new(http.Client)
-					req, err := http.NewRequest("GET", checksumURL, nil)
-					if err != nil {
-						callback.OnError(err)
-						return
-					}
-					resp, err := client.Do(req)
-					if err != nil {
-						callback.OnError(err)
-						return
-					}
-					defer resp.Body.Close()
-					reader := bufio.NewReader(resp.Body)
-					for {
-						line, err := reader.ReadString('\n')
-						if err != nil {
-							if err == io.EOF {
-								break
-							} else {
-								callback.OnError(err)
-								return
-							}
-						}
-						fields := strings.Fields(line)
-						if len(fields) != 2 {
-							callback.OnError(errors.New("unexpected_checksum_line_fmt"))
-							return
-						}
-						filename := fields[1]
-						hash := fields[0]
-						if filename == "graph-001d.db" {
-							checksumValue = hash
-						}
-					}
-					// download retry
-					err = downloadGraph(cacheDir, dgraphPath, log, breezURL)
-					if err != nil {
-						callback.OnError(err)
-						return
-					}
-					// recalculate the md5sum of the retry downloaded file we have
-					fh, err := os.Open(dgraphPath)
-					if err != nil {
-						callback.OnError(err)
-						return
-					}
-					defer fh.Close()
-					md5h := md5.New()
-					_, err = io.Copy(md5h, fh)
-					if err != nil {
-						callback.OnError(err)
-						return
-					}
-					sum := md5h.Sum(nil)
-					calculatedChecksum = hex.EncodeToString(sum)
-					if checksumValue != calculatedChecksum {
-						// failed checksum check again
-						// unconditionally remove dgraph file and lastRun and give up
-						log.Printf("Checksum mismatch for redownload, expected %s got %s", checksumValue, calculatedChecksum)
-						os.Remove(dgraphPath)
-						os.Remove(lastRunPath)
-						callback.OnResponse([]byte("skip_checksum_failed"))
-						return
-					} else {
-						log.Printf("Checksum validated on redownload: %s", calculatedChecksum)
-						useDGraph = true
-					}
-				}
+				callback.OnResponse([]byte("skip_checksum_failed"))
+				return
 			} else {
 				log.Printf("Checksum OK %s", calculatedChecksum)
-				// checksum matches
-				// now check modtime
-				info, err := os.Stat(dgraphPath)
-				// check the modified time on the existing downloaded channel.db, see if it is <= 48h old
-				if err == nil {
-					modifiedTime := info.ModTime()
-					now := time.Now()
-					diff := now.Sub(modifiedTime)
-					if diff.Hours() <= 48 {
-						// abort downloading the graph, we have a fresh-enough downloaded graph
-						useDGraph = true
-					}
-				}
 			}
 		}
-	}
-	// if the dgraph is not usable, download the graph
-	if !useDGraph {
-		// download the breez gossip database
-		err = downloadGraph(cacheDir, dgraphPath, log, breezURL)
+		// open channel.db as dest
+		service, release, err := serviceRefCounter.Get(
+			func() (interface{}, refcount.ReleaseFunc, error) {
+				return newService(dataDir, log)
+			},
+		)
 		if err != nil {
 			callback.OnError(err)
 			return
 		}
-		fh, err := os.Open(dgraphPath)
+		defer release()
+		destDB := service.(*channeldb.DB)
+		// temporarily copy dgraph to usage dir
+		err = copyFile(dgraphPath, usagePath)
+		// open dgraph.db as source
+		dchanDB, err := channeldb.Open(cacheDir + "/usage")
+		defer os.Remove(usagePath)
+		defer dchanDB.Close()
 		if err != nil {
 			callback.OnError(err)
 			return
 		}
-		defer fh.Close()
-		md5h := md5.New()
-		_, err = io.Copy(md5h, fh)
+		defer dchanDB.Close()
+		sourceDB, err := bdb.UnderlineDB(dchanDB.Backend)
 		if err != nil {
 			callback.OnError(err)
 			return
 		}
-		sum := md5h.Sum(nil)
-		calculatedChecksum := hex.EncodeToString(sum)
-		if checksumValue != calculatedChecksum {
-			// failed checksum check (just downloaded file)
-			// unconditionally remove dgraph file and lastRun
+		// utility function to convert bolts key to a string path.
+		extractPathElements := func(bytesPath [][]byte, key []byte) []string {
+			var path []string
+			for _, b := range bytesPath {
+				path = append(path, string(b))
+			}
+			return append(path, string(key))
+		}
+		ourNode, err := ourNode(destDB)
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
+		kvdbTx, err := destDB.BeginReadWriteTx()
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
+		tx, err := bdb.UnderlineTX(kvdbTx)
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
+		defer tx.Rollback()
+		if ourNode == nil && hasSourceNode(tx) {
+			callback.OnError(err)
+			return
+			//errors.New("source node was set before sync transaction, rolling back").Error()
+		}
+		if ourNode != nil {
+			channelNodes, channels, policies, err := ourData(kvdbTx, ourNode)
 			if err != nil {
 				callback.OnError(err)
 				return
 			}
-			log.Printf("Checksum mismatch, expected %s got %s", checksumValue, calculatedChecksum)
-			os.Remove(dgraphPath)
-			os.Remove(lastRunPath)
-			callback.OnResponse([]byte("skip_checksum_failed"))
-			return
-		} else {
-			log.Printf("Checksum OK %s", calculatedChecksum)
-		}
-	}
-	// open channel.db as dest
-	service, release, err := serviceRefCounter.Get(
-		func() (interface{}, refcount.ReleaseFunc, error) {
-			return newService(dataDir, log)
-		},
-	)
-	if err != nil {
-		callback.OnError(err)
-		return
-	}
-	defer release()
-	destDB := service.(*channeldb.DB)
-	// temporarily copy dgraph to usage dir
-	err = copyFile(dgraphPath, usagePath)
-	// open dgraph.db as source
-	dchanDB, err := channeldb.Open(cacheDir + "/usage")
-	defer os.Remove(usagePath)
-	defer dchanDB.Close()
-	if err != nil {
-		callback.OnError(err)
-		return
-	}
-	defer dchanDB.Close()
-	sourceDB, err := bdb.UnderlineDB(dchanDB.Backend)
-	if err != nil {
-		callback.OnError(err)
-		return
-	}
-	// utility function to convert bolts key to a string path.
-	extractPathElements := func(bytesPath [][]byte, key []byte) []string {
-		var path []string
-		for _, b := range bytesPath {
-			path = append(path, string(b))
-		}
-		return append(path, string(key))
-	}
-	ourNode, err := ourNode(destDB)
-	if err != nil {
-		callback.OnError(err)
-		return
-	}
-	kvdbTx, err := destDB.BeginReadWriteTx()
-	if err != nil {
-		callback.OnError(err)
-		return
-	}
-	tx, err := bdb.UnderlineTX(kvdbTx)
-	if err != nil {
-		callback.OnError(err)
-		return
-	}
-	defer tx.Rollback()
-	if ourNode == nil && hasSourceNode(tx) {
-		callback.OnError(err)
-		return
-		//errors.New("source node was set before sync transaction, rolling back").Error()
-	}
-	if ourNode != nil {
-		channelNodes, channels, policies, err := ourData(kvdbTx, ourNode)
-		if err != nil {
-			callback.OnError(err)
-			return
-		}
 
-		// add our data to the source db.
-		if err := putOurData(dchanDB, ourNode, channelNodes, channels, policies); err != nil {
-			callback.OnError(err)
-			return
+			// add our data to the source db.
+			if err := putOurData(dchanDB, ourNode, channelNodes, channels, policies); err != nil {
+				callback.OnError(err)
+				return
+			}
 		}
-	}
-	// clear graph data from the destination db
-	for b := range bucketsToCopy {
-		if err := tx.DeleteBucket([]byte(b)); err != nil && err != bbolt.ErrBucketNotFound {
-			callback.OnError(err)
-			return
+		// clear graph data from the destination db
+		for b := range bucketsToCopy {
+			if err := tx.DeleteBucket([]byte(b)); err != nil && err != bbolt.ErrBucketNotFound {
+				callback.OnError(err)
+				return
+			}
 		}
-	}
-	err = merge(tx, sourceDB,
-		func(keyPath [][]byte, k []byte, v []byte) bool {
-			pathElements := extractPathElements(keyPath, k)
-			_, shouldCopy := bucketsToCopy[pathElements[0]]
-			return !shouldCopy
-		})
-	if err != nil {
-		callback.OnError(err)
-		return
-	}
-	// update the lastrun modified time
-	now := time.Now()
-	if !fileExists(lastRunPath) {
-		_, err = os.Create(lastRunPath)
+		err = merge(tx, sourceDB,
+			func(keyPath [][]byte, k []byte, v []byte) bool {
+				pathElements := extractPathElements(keyPath, k)
+				_, shouldCopy := bucketsToCopy[pathElements[0]]
+				return !shouldCopy
+			})
 		if err != nil {
 			callback.OnError(err)
 			return
 		}
+		// update the lastrun modified time
+		now := time.Now()
+		if !fileExists(lastRunPath) {
+			_, err = os.Create(lastRunPath)
+			if err != nil {
+				callback.OnError(err)
+				return
+			}
+		}
+		err = os.Chtimes(lastRunPath, now, now)
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
+		callback.OnResponse([]byte(fmt.Sprintf("dl=%t,done_commit_err=%v", !useDGraph, tx.Commit())))
 	}
-	err = os.Chtimes(lastRunPath, now, now)
-	if err != nil {
-		callback.OnError(err)
-		return
-	}
-	callback.OnResponse([]byte(fmt.Sprintf("dl=%t,done_commit_err=%v", !useDGraph, tx.Commit())))
+}
+
+func CancelGossipSync() {
+	cancelGlobal()
 }
 
 func copyFile(srcPath, destPath string) error {
