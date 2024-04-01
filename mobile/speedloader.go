@@ -343,6 +343,7 @@ func downloadPatch(cacheDir string, log *Logger, dgraphHash string, patchURL str
 			return err
 		}
 		req.Header.Add("Accept-Encoding", "br, gzip")
+		req = req.WithContext(globalCtx)
 		resp, err := client.Do(req)
 		if err != nil {
 			log.Println(err.Error())
@@ -403,6 +404,7 @@ func downloadGraph(cacheDir string, dgraphPath string, log *Logger, breezURL str
 			return err
 		}
 		req.Header.Add("Accept-Encoding", "br, gzip")
+		req = req.WithContext(globalCtx)
 		resp, err := client.Do(req)
 		if err != nil {
 			log.Println(err.Error())
@@ -483,6 +485,7 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 			callback.OnError(err)
 			return
 		}
+		req = req.WithContext(globalCtx)
 		resp, err := client.Do(req)
 		if err != nil {
 			callback.OnError(err)
@@ -604,6 +607,7 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 							callback.OnError(err)
 							return
 						}
+						req = req.WithContext(globalCtx)
 						resp, err := client.Do(req)
 						if err != nil {
 							callback.OnError(err)
