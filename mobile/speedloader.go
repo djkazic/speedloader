@@ -87,7 +87,7 @@ func (l *Logger) Close() error {
 func createService(workingDir string, log *Logger) (*channeldb.DB, error) {
 	var err error
 	graphDir := path.Join(workingDir, strings.Replace(directoryPattern, "{{network}}", "mainnet", -1))
-	fmt.Println("creating shared channeldb service.")
+	log.Println("creating shared channeldb service.")
 	chanDB, err := channeldb.Open(graphDir,
 		channeldb.OptionSetSyncFreelist(true))
 	if err != nil {
@@ -95,7 +95,7 @@ func createService(workingDir string, log *Logger) (*channeldb.DB, error) {
 		return nil, err
 	}
 
-	fmt.Println("channeldb was opened successfuly")
+	log.Println("channeldb was opened successfuly")
 	return chanDB, err
 }
 
@@ -111,11 +111,11 @@ func newService(workingDir string, log *Logger) (db *channeldb.DB, rel refcount.
 	return chanDB, release, err
 }
 
-func walkBucket(b *bbolt.Bucket, keypath [][]byte, k, v []byte, seq uint64, fn walkFunc, skip skipFunc) error {
+func walkBucket(b *bbolt.Bucket, keypath [][]byte, k, v []byte, seq uint64, fn walkFunc, skip skipFunc, log *Logger) error {
 	select {
 	case <-globalCtx.Done():
 		// Global context cancelled, return early
-		fmt.Println("Cancelling walkBucket")
+		log.Println("Cancelling walkBucket")
 		return globalCtx.Err()
 	default:
 		if skip != nil && skip(keypath, k, v) {
@@ -134,23 +134,23 @@ func walkBucket(b *bbolt.Bucket, keypath [][]byte, k, v []byte, seq uint64, fn w
 		return b.ForEach(func(k, v []byte) error {
 			if v == nil {
 				bkt := b.Bucket(k)
-				return walkBucket(bkt, keypath, k, nil, bkt.Sequence(), fn, skip)
+				return walkBucket(bkt, keypath, k, nil, bkt.Sequence(), fn, skip, log)
 			}
-			return walkBucket(b, keypath, k, v, b.Sequence(), fn, skip)
+			return walkBucket(b, keypath, k, v, b.Sequence(), fn, skip, log)
 		})
 	}
 }
 
-func walk(db *bbolt.DB, walkFn walkFunc, skipFn skipFunc) error {
+func walk(db *bbolt.DB, walkFn walkFunc, skipFn skipFunc, log *Logger) error {
 	select {
 	case <-globalCtx.Done():
 		// Global context cancelled, return early
-		fmt.Println("Cancelling walk")
+		log.Println("Cancelling walk")
 		return globalCtx.Err()
 	default:
 		return db.View(func(tx *bbolt.Tx) error {
 			return tx.ForEach(func(name []byte, b *bbolt.Bucket) error {
-				return walkBucket(b, nil, name, nil, b.Sequence(), walkFn, skipFn)
+				return walkBucket(b, nil, name, nil, b.Sequence(), walkFn, skipFn, log)
 			})
 		})
 	}
@@ -158,11 +158,11 @@ func walk(db *bbolt.DB, walkFn walkFunc, skipFn skipFunc) error {
 
 // Merge copies from source to dest and ignoring items using the skip function.
 // It is different from Compact in that it tries to create a bucket only if not exists.
-func merge(tx *bbolt.Tx, src *bbolt.DB, skip skipFunc) error {
+func merge(tx *bbolt.Tx, src *bbolt.DB, skip skipFunc, log *Logger) error {
 	select {
 	case <-globalCtx.Done():
 		// Global context cancelled, return early
-		fmt.Println("Cancelling merge")
+		log.Println("Cancelling merge")
 		return globalCtx.Err()
 	default:
 		if err := walk(src, func(keys [][]byte, k, v []byte, seq uint64) error {
@@ -200,7 +200,7 @@ func merge(tx *bbolt.Tx, src *bbolt.DB, skip skipFunc) error {
 			}
 			// Otherwise treat it as a key/value pair.
 			return b.Put(k, v)
-		}, skip); err != nil {
+		}, skip, log); err != nil {
 			return err
 		}
 		return nil
@@ -220,7 +220,7 @@ func ourNode(chanDB *channeldb.DB) (*channeldb.LightningNode, error) {
 	return node, err
 }
 
-func ourData(tx walletdb.ReadWriteTx, ourNode *channeldb.LightningNode) (
+func ourData(tx walletdb.ReadWriteTx, ourNode *channeldb.LightningNode, log *Logger) (
 	[]*channeldb.LightningNode, []*channeldb.ChannelEdgeInfo, []*channeldb.ChannelEdgePolicy, error) {
 	nodeMap := make(map[string]*channeldb.LightningNode)
 	var edges []*channeldb.ChannelEdgeInfo
@@ -230,7 +230,7 @@ func ourData(tx walletdb.ReadWriteTx, ourNode *channeldb.LightningNode) (
 	select {
 	case <-globalCtx.Done():
 		// Global context cancelled, return early
-		fmt.Println("Cancelling ourData")
+		log.Println("Cancelling ourData")
 		return nodes, edges, policies, globalCtx.Err()
 	default:
 		err := ourNode.ForEachChannel(tx, func(tx walletdb.ReadTx,
@@ -263,12 +263,12 @@ func ourData(tx walletdb.ReadWriteTx, ourNode *channeldb.LightningNode) (
 }
 
 func putOurData(chanDB *channeldb.DB, node *channeldb.LightningNode, nodes []*channeldb.LightningNode,
-	edges []*channeldb.ChannelEdgeInfo, policies []*channeldb.ChannelEdgePolicy) error {
+	edges []*channeldb.ChannelEdgeInfo, policies []*channeldb.ChannelEdgePolicy, log *Logger) error {
 
 	select {
 	case <-globalCtx.Done():
 		// Global context cancelled, return early
-		fmt.Println("Cancelling putOurData")
+		log.Println("Cancelling putOurData")
 		return globalCtx.Err()
 	default:
 		graph := chanDB.ChannelGraph()
@@ -328,7 +328,7 @@ func downloadPatch(cacheDir string, log *Logger, dgraphHash string, patchURL str
 	select {
 	case <-globalCtx.Done():
 		// Global context cancelled, return early
-		fmt.Println("Cancelling downloadPatch")
+		log.Println("Cancelling downloadPatch")
 		return globalCtx.Err()
 	default:
 		out, err := os.Create(patchPath)
@@ -389,7 +389,7 @@ func downloadGraph(cacheDir string, dgraphPath string, log *Logger, breezURL str
 	select {
 	case <-globalCtx.Done():
 		// Global context cancelled, return early
-		fmt.Println("Cancelling downloadGraph")
+		log.Println("Cancelling downloadGraph")
 		return globalCtx.Err()
 	default:
 		out, err := os.Create(dgraphPath)
@@ -453,10 +453,16 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 		checksumValue string
 	)
 
+	log, err := NewLogger(logPath)
+	if err != nil {
+		callback.OnError(err)
+		return
+	}
+
 	select {
 	case <-globalCtx.Done():
 		// Global context cancelled, return early
-		fmt.Println("Cancelling GossipSync")
+		log.Println("Cancelling GossipSync")
 		callback.OnError(globalCtx.Err())
 		return
 	default:
@@ -519,11 +525,6 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 		// 	useDGraph = true
 		// }
 		initDirs(cacheDir)
-		log, err := NewLogger(logPath)
-		if err != nil {
-			callback.OnError(err)
-			return
-		}
 		if checksumValue != "" {
 			// we have a valid checksum
 			// do we have a file?
@@ -739,7 +740,7 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 		defer release()
 		destDB := service.(*channeldb.DB)
 		// temporarily copy dgraph to usage dir
-		err = copyFile(dgraphPath, usagePath)
+		err = copyFile(dgraphPath, usagePath, log)
 		// open dgraph.db as source
 		dchanDB, err := channeldb.Open(cacheDir + "/usage")
 		defer os.Remove(usagePath)
@@ -784,14 +785,14 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 			//errors.New("source node was set before sync transaction, rolling back").Error()
 		}
 		if ourNode != nil {
-			channelNodes, channels, policies, err := ourData(kvdbTx, ourNode)
+			channelNodes, channels, policies, err := ourData(kvdbTx, ourNode, log)
 			if err != nil {
 				callback.OnError(err)
 				return
 			}
 
 			// add our data to the source db.
-			if err := putOurData(dchanDB, ourNode, channelNodes, channels, policies); err != nil {
+			if err := putOurData(dchanDB, ourNode, channelNodes, channels, policies, log); err != nil {
 				callback.OnError(err)
 				return
 			}
@@ -808,7 +809,7 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 				pathElements := extractPathElements(keyPath, k)
 				_, shouldCopy := bucketsToCopy[pathElements[0]]
 				return !shouldCopy
-			})
+			}, log)
 		if err != nil {
 			callback.OnError(err)
 			return
@@ -835,11 +836,11 @@ func CancelGossipSync() {
 	cancelGlobal()
 }
 
-func copyFile(srcPath, destPath string) error {
+func copyFile(srcPath, destPath string, log *Logger) error {
 	select {
 	case <-globalCtx.Done():
 		// Global context cancelled, return early
-		fmt.Println("Cancelling copyFile")
+		log.Println("Cancelling copyFile")
 		return globalCtx.Err()
 	default:
 		srcFile, err := os.Open(srcPath)
