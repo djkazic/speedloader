@@ -453,6 +453,7 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 		checksumValue string
 	)
 
+	initDirs(cacheDir)
 	log, err := NewLogger(logPath)
 	if err != nil {
 		callback.OnError(err)
@@ -524,7 +525,6 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 		// if networkType != "wifi" && networkType != "ethernet" {
 		// 	useDGraph = true
 		// }
-		initDirs(cacheDir)
 		if checksumValue != "" {
 			// we have a valid checksum
 			// do we have a file?
