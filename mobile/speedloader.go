@@ -23,6 +23,7 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/gabstv/go-bsdiff/pkg/bspatch"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/channeldb/models"
 	"go.etcd.io/bbolt"
 )
 
@@ -220,11 +221,11 @@ func ourNode(chanDB *channeldb.DB) (*channeldb.LightningNode, error) {
 	return node, err
 }
 
-func ourData(tx walletdb.ReadWriteTx, ourNode *channeldb.LightningNode, log *Logger) (
-	[]*channeldb.LightningNode, []*channeldb.ChannelEdgeInfo, []*channeldb.ChannelEdgePolicy, error) {
+func ourData(chanDB *channeldb.DB, tx walletdb.ReadWriteTx, ourNode *channeldb.LightningNode, log *Logger) (
+	[]*channeldb.LightningNode, []*models.ChannelEdgeInfo, []*models.ChannelEdgePolicy, error) {
 	nodeMap := make(map[string]*channeldb.LightningNode)
-	var edges []*channeldb.ChannelEdgeInfo
-	var policies []*channeldb.ChannelEdgePolicy
+	var edges []*models.ChannelEdgeInfo
+	var policies []*models.ChannelEdgePolicy
 	var nodes []*channeldb.LightningNode
 
 	select {
@@ -233,15 +234,18 @@ func ourData(tx walletdb.ReadWriteTx, ourNode *channeldb.LightningNode, log *Log
 		log.Println("Cancelling ourData")
 		return nodes, edges, policies, globalCtx.Err()
 	default:
-		err := ourNode.ForEachChannel(tx, func(tx walletdb.ReadTx,
-			channelEdgeInfo *channeldb.ChannelEdgeInfo,
-			toPolicy *channeldb.ChannelEdgePolicy,
-			fromPolicy *channeldb.ChannelEdgePolicy) error {
+		graph := chanDB.ChannelGraph()
+		err := graph.ForEachNodeChannel(tx, ourNode.PubKeyBytes, func(tx walletdb.ReadTx,
+			channelEdgeInfo *models.ChannelEdgeInfo,
+			toPolicy *models.ChannelEdgePolicy,
+			fromPolicy *models.ChannelEdgePolicy) error {
 
 			if toPolicy == nil || fromPolicy == nil {
 				return nil
 			}
-			nodeMap[hex.EncodeToString(toPolicy.Node.PubKeyBytes[:])] = toPolicy.Node
+			nodeMap[hex.EncodeToString(toPolicy.ToNode[:])] = &channeldb.LightningNode{
+				PubKeyBytes: toPolicy.ToNode,
+			}
 			edges = append(edges, channelEdgeInfo)
 			if toPolicy != nil {
 				policies = append(policies, toPolicy)
@@ -263,7 +267,7 @@ func ourData(tx walletdb.ReadWriteTx, ourNode *channeldb.LightningNode, log *Log
 }
 
 func putOurData(chanDB *channeldb.DB, node *channeldb.LightningNode, nodes []*channeldb.LightningNode,
-	edges []*channeldb.ChannelEdgeInfo, policies []*channeldb.ChannelEdgePolicy, log *Logger) error {
+	edges []*models.ChannelEdgeInfo, policies []*models.ChannelEdgePolicy, log *Logger) error {
 
 	select {
 	case <-globalCtx.Done():
@@ -785,7 +789,7 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 			//errors.New("source node was set before sync transaction, rolling back").Error()
 		}
 		if ourNode != nil {
-			channelNodes, channels, policies, err := ourData(kvdbTx, ourNode, log)
+			channelNodes, channels, policies, err := ourData(destDB, kvdbTx, ourNode, log)
 			if err != nil {
 				callback.OnError(err)
 				return
