@@ -221,7 +221,7 @@ func ourNode(chanDB *channeldb.DB) (*channeldb.LightningNode, error) {
 	return node, err
 }
 
-func ourData(chanDB *channeldb.DB, tx walletdb.ReadWriteTx, ourNode *channeldb.LightningNode, log *Logger) (
+func ourData(chanDB *channeldb.DB, ourNode *channeldb.LightningNode, log *Logger) (
 	[]*channeldb.LightningNode, []*models.ChannelEdgeInfo, []*models.ChannelEdgePolicy, error) {
 	nodeMap := make(map[string]*channeldb.LightningNode)
 	var edges []*models.ChannelEdgeInfo
@@ -235,7 +235,7 @@ func ourData(chanDB *channeldb.DB, tx walletdb.ReadWriteTx, ourNode *channeldb.L
 		return nodes, edges, policies, globalCtx.Err()
 	default:
 		graph := chanDB.ChannelGraph()
-		err := graph.ForEachNodeChannel(tx, ourNode.PubKeyBytes, func(tx walletdb.ReadTx,
+		err := graph.ForEachNodeChannel(ourNode.PubKeyBytes, func(tx walletdb.ReadTx,
 			channelEdgeInfo *models.ChannelEdgeInfo,
 			toPolicy *models.ChannelEdgePolicy,
 			fromPolicy *models.ChannelEdgePolicy) error {
@@ -789,7 +789,7 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 			//errors.New("source node was set before sync transaction, rolling back").Error()
 		}
 		if ourNode != nil {
-			channelNodes, channels, policies, err := ourData(destDB, kvdbTx, ourNode, log)
+			channelNodes, channels, policies, err := ourData(destDB, ourNode, log)
 			if err != nil {
 				callback.OnError(err)
 				return
