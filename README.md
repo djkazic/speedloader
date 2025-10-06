@@ -8,9 +8,7 @@ Additional deps:
 ```
 replace github.com/breez/breez => github.com/djkazic/breez v0.0.8
 
-replace github.com/btcsuite/btcwallet => github.com/djkazic/btcwallet v1.7.2
-
-replace github.com/btcsuite/btcwallet/walletdb => github.com/djkazic/btcwallet/walletdb v1.7.2
+replace github.com/btcsuite/btcwallet/walletdb => github.com/djkazic/btcwallet/walletdb v1.7.4
 ```
 
 then run `go mod tidy`

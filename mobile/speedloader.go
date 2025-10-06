@@ -19,11 +19,12 @@ import (
 
 	"github.com/andybalholm/brotli"
 	"github.com/breez/breez/refcount"
-	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/gabstv/go-bsdiff/pkg/bspatch"
 	"github.com/lightningnetwork/lnd/channeldb"
-	"github.com/lightningnetwork/lnd/channeldb/models"
+	graphdb "github.com/lightningnetwork/lnd/graph/db"
+	"github.com/lightningnetwork/lnd/graph/db/models"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"go.etcd.io/bbolt"
 )
 
@@ -35,6 +36,7 @@ var (
 	ErrMissingPolicyError = errors.New("missing channel policy")
 	serviceRefCounter     refcount.ReferenceCountable
 	chanDB                *channeldb.DB
+	graphDB               *graphdb.ChannelGraph
 	bucketsToCopy         = map[string]struct{}{
 		"graph-edge": {},
 		"graph-node": {},
@@ -85,31 +87,57 @@ func (l *Logger) Close() error {
 	return l.file.Close()
 }
 
-func createService(workingDir string, log *Logger) (*channeldb.DB, error) {
+func createService(workingDir string, log *Logger) (*channeldb.DB, *graphdb.ChannelGraph, error) {
 	var err error
 	graphDir := path.Join(workingDir, strings.Replace(directoryPattern, "{{network}}", "mainnet", -1))
 	log.Println("creating shared channeldb service.")
-	chanDB, err := channeldb.Open(graphDir,
-		channeldb.OptionSetSyncFreelist(true))
+
+	backend, err := kvdb.GetBoltBackend(&kvdb.BoltBackendConfig{
+		DBPath:         graphDir,
+		DBFileName:     "channel.db",
+		NoFreelistSync: false,
+		DBTimeout:      kvdb.DefaultDBTimeout,
+		ReadOnly:       false,
+	})
 	if err != nil {
-		log.Printf("unable to open channeldb: %v", err)
-		return nil, err
+		log.Printf("unable to create kvdb backend: %v", err)
+		return nil, nil, err
 	}
 
-	log.Println("channeldb was opened successfuly")
-	return chanDB, err
+	chanDB, err := channeldb.CreateWithBackend(backend)
+	if err != nil {
+		log.Printf("unable to create channeldb: %v", err)
+		backend.Close()
+		return nil, nil, err
+	}
+
+	graphDB, err := graphdb.NewChannelGraph(&graphdb.Config{
+		KVDB: backend,
+	})
+	if err != nil {
+		log.Printf("unable to create graphdb: %v", err)
+		chanDB.Close()
+		backend.Close()
+		return nil, nil, err
+	}
+
+	log.Println("channeldb and graphdb were opened successfully")
+	return chanDB, graphDB, err
 }
 
 func release() error {
+	if graphDB != nil {
+		graphDB.Stop()
+	}
 	return chanDB.Close()
 }
 
-func newService(workingDir string, log *Logger) (db *channeldb.DB, rel refcount.ReleaseFunc, err error) {
-	chanDB, err = createService(workingDir, log)
+func newService(workingDir string, log *Logger) (db *channeldb.DB, graph *graphdb.ChannelGraph, rel refcount.ReleaseFunc, err error) {
+	chanDB, graphDB, err = createService(workingDir, log)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return chanDB, release, err
+	return chanDB, graphDB, release, err
 }
 
 func walkBucket(b *bbolt.Bucket, keypath [][]byte, k, v []byte, seq uint64, fn walkFunc, skip skipFunc, log *Logger) error {
@@ -212,21 +240,20 @@ type walkFunc func(keys [][]byte, k, v []byte, seq uint64) error
 
 type skipFunc func(keys [][]byte, k, v []byte) bool
 
-func ourNode(chanDB *channeldb.DB) (*channeldb.LightningNode, error) {
-	graph := chanDB.ChannelGraph()
-	node, err := graph.SourceNode()
-	if err == channeldb.ErrSourceNodeNotSet || err == channeldb.ErrGraphNotFound {
+func ourNode(graphDB *graphdb.ChannelGraph) (*models.LightningNode, error) {
+	node, err := graphDB.SourceNode()
+	if err == graphdb.ErrSourceNodeNotSet || err == graphdb.ErrGraphNotFound {
 		return nil, nil
 	}
 	return node, err
 }
 
-func ourData(chanDB *channeldb.DB, ourNode *channeldb.LightningNode, log *Logger) (
-	[]*channeldb.LightningNode, []*models.ChannelEdgeInfo, []*models.ChannelEdgePolicy, error) {
-	nodeMap := make(map[string]*channeldb.LightningNode)
+func ourData(graphDB *graphdb.ChannelGraph, ourNode *models.LightningNode, log *Logger) (
+	[]*models.LightningNode, []*models.ChannelEdgeInfo, []*models.ChannelEdgePolicy, error) {
+	nodeMap := make(map[string]*models.LightningNode)
 	var edges []*models.ChannelEdgeInfo
 	var policies []*models.ChannelEdgePolicy
-	var nodes []*channeldb.LightningNode
+	var nodes []*models.LightningNode
 
 	select {
 	case <-globalCtx.Done():
@@ -234,8 +261,7 @@ func ourData(chanDB *channeldb.DB, ourNode *channeldb.LightningNode, log *Logger
 		log.Println("Cancelling ourData")
 		return nodes, edges, policies, globalCtx.Err()
 	default:
-		graph := chanDB.ChannelGraph()
-		err := graph.ForEachNodeChannel(ourNode.PubKeyBytes, func(tx walletdb.ReadTx,
+		err := graphDB.ForEachNodeChannel(ourNode.PubKeyBytes, func(
 			channelEdgeInfo *models.ChannelEdgeInfo,
 			toPolicy *models.ChannelEdgePolicy,
 			fromPolicy *models.ChannelEdgePolicy) error {
@@ -243,7 +269,7 @@ func ourData(chanDB *channeldb.DB, ourNode *channeldb.LightningNode, log *Logger
 			if toPolicy == nil || fromPolicy == nil {
 				return nil
 			}
-			nodeMap[hex.EncodeToString(toPolicy.ToNode[:])] = &channeldb.LightningNode{
+			nodeMap[hex.EncodeToString(toPolicy.ToNode[:])] = &models.LightningNode{
 				PubKeyBytes: toPolicy.ToNode,
 			}
 			edges = append(edges, channelEdgeInfo)
@@ -266,7 +292,7 @@ func ourData(chanDB *channeldb.DB, ourNode *channeldb.LightningNode, log *Logger
 	}
 }
 
-func putOurData(chanDB *channeldb.DB, node *channeldb.LightningNode, nodes []*channeldb.LightningNode,
+func putOurData(graphKV *graphdb.KVStore, node *models.LightningNode, nodes []*models.LightningNode,
 	edges []*models.ChannelEdgeInfo, policies []*models.ChannelEdgePolicy, log *Logger) error {
 
 	select {
@@ -275,25 +301,24 @@ func putOurData(chanDB *channeldb.DB, node *channeldb.LightningNode, nodes []*ch
 		log.Println("Cancelling putOurData")
 		return globalCtx.Err()
 	default:
-		graph := chanDB.ChannelGraph()
-		err := graph.SetSourceNode(node)
+		err := graphKV.SetSourceNode(node)
 		if err != nil {
 			return fmt.Errorf("graph.SetSourceNode(%x): %w", node.PubKeyBytes, err)
 		}
 		for _, n := range nodes {
-			err = graph.AddLightningNode(n)
+			err = graphKV.AddLightningNode(n)
 			if err != nil {
 				return fmt.Errorf("graph.AddLightningNode(%x): %w", n.PubKeyBytes, err)
 			}
 		}
 		for _, edge := range edges {
-			err = graph.AddChannelEdge(edge)
-			if err != nil && err != channeldb.ErrEdgeAlreadyExist {
+			err = graphKV.AddChannelEdge(edge)
+			if err != nil && err != graphdb.ErrEdgeAlreadyExist {
 				return fmt.Errorf("graph.AddChannelEdge(%x): %w", edge.ChannelID, err)
 			}
 		}
 		for _, policy := range policies {
-			err = graph.UpdateEdgePolicy(policy)
+			_, _, err = graphKV.UpdateEdgePolicy(policy)
 			if err != nil {
 				return fmt.Errorf("graph.UpdateEdgePolicy(): %w", err)
 			}
@@ -734,7 +759,15 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 		// open channel.db as dest
 		service, release, err := serviceRefCounter.Get(
 			func() (interface{}, refcount.ReleaseFunc, error) {
-				return newService(dataDir, log)
+				chanDB, graphDB, rel, err := newService(dataDir, log)
+				if err != nil {
+					return nil, nil, err
+				}
+				// Return a struct containing both databases
+				return struct {
+					chanDB  *channeldb.DB
+					graphDB *graphdb.ChannelGraph
+				}{chanDB, graphDB}, rel, nil
 			},
 		)
 		if err != nil {
@@ -742,18 +775,44 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 			return
 		}
 		defer release()
-		destDB := service.(*channeldb.DB)
+		serviceStruct := service.(struct {
+			chanDB  *channeldb.DB
+			graphDB *graphdb.ChannelGraph
+		})
+		destDB := serviceStruct.chanDB
+		destGraphDB := serviceStruct.graphDB
 		// temporarily copy dgraph to usage dir
 		err = copyFile(dgraphPath, usagePath, log)
 		// open dgraph.db as source
-		dchanDB, err := channeldb.Open(cacheDir + "/usage")
+		sourceBackend, err := kvdb.GetBoltBackend(&kvdb.BoltBackendConfig{
+			DBPath:         cacheDir + "/usage",
+			DBFileName:     "channel.db",
+			NoFreelistSync: false,
+			DBTimeout:      kvdb.DefaultDBTimeout,
+			ReadOnly:       false,
+		})
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
+		defer sourceBackend.Close()
+
+		dchanDB, err := channeldb.CreateWithBackend(sourceBackend)
 		defer os.Remove(usagePath)
-		defer dchanDB.Close()
 		if err != nil {
 			callback.OnError(err)
 			return
 		}
 		defer dchanDB.Close()
+
+		// Use KVStore directly instead of ChannelGraph to avoid blocking on
+		// topology update channels that have no receivers
+		sourceGraphKV, err := graphdb.NewKVStore(sourceBackend)
+		log.Printf("Created source graphdb KVStore, err: %v", err)
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
 		sourceDB, err := bdb.UnderlineDB(dchanDB.Backend)
 		if err != nil {
 			callback.OnError(err)
@@ -767,7 +826,7 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 			}
 			return append(path, string(key))
 		}
-		ourNode, err := ourNode(destDB)
+		ourNode, err := ourNode(destGraphDB)
 		if err != nil {
 			callback.OnError(err)
 			return
@@ -789,14 +848,14 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 			//errors.New("source node was set before sync transaction, rolling back").Error()
 		}
 		if ourNode != nil {
-			channelNodes, channels, policies, err := ourData(destDB, ourNode, log)
+			channelNodes, channels, policies, err := ourData(destGraphDB, ourNode, log)
 			if err != nil {
 				callback.OnError(err)
 				return
 			}
 
 			// add our data to the source db.
-			if err := putOurData(dchanDB, ourNode, channelNodes, channels, policies, log); err != nil {
+			if err := putOurData(sourceGraphKV, ourNode, channelNodes, channels, policies, log); err != nil {
 				callback.OnError(err)
 				return
 			}
@@ -832,6 +891,7 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 			callback.OnError(err)
 			return
 		}
+		log.Printf("Done")
 		callback.OnResponse([]byte(fmt.Sprintf("dl=%t,done_commit_err=%v", !useDGraph, tx.Commit())))
 	}
 }
